@@ -6,6 +6,8 @@ import json
 import os
 import re
 import sys
+import time
+import threading
 from pathlib import Path
 
 from rich.console import Console
@@ -13,6 +15,8 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 from rich.syntax import Syntax
+from rich.live import Live
+from rich.text import Text
 
 from .conversation import Conversation
 from .llm import chat, get_system_prompt
@@ -21,6 +25,24 @@ from .tools import execute_tool
 console = Console()
 
 TOOL_NAMES = {"read_file", "write_file", "bash"}
+MAX_CONTEXT_TOKENS = 198000
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count (roughly 4 chars per token)."""
+    return len(text) // 4
+
+
+def get_context_usage(messages: list, system_prompt: str) -> tuple[int, float]:
+    """Calculate estimated token usage and percentage."""
+    total_text = system_prompt
+    for msg in messages:
+        content = msg.get("content", "")
+        if content:
+            total_text += content
+    tokens = estimate_tokens(total_text)
+    percentage = (tokens / MAX_CONTEXT_TOKENS) * 100
+    return tokens, percentage
 
 
 def parse_tool_calls_from_text(content: str) -> list[dict] | None:
@@ -175,7 +197,46 @@ def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
 def run_agent_loop(conversation: Conversation, model: str, system_prompt: str, auto_approve: bool = False) -> None:
     """Run the agent loop until no more tool calls."""
     while True:
-        response = chat(conversation.messages, model=model, system_prompt=system_prompt)
+        tokens, pct = get_context_usage(conversation.messages, system_prompt)
+
+        # Use threading to update elapsed time while waiting
+        response = None
+        error = None
+        start_time = time.time()
+
+        def do_chat():
+            nonlocal response, error
+            try:
+                response = chat(conversation.messages, model=model, system_prompt=system_prompt)
+            except Exception as e:
+                error = e
+
+        thread = threading.Thread(target=do_chat)
+        thread.start()
+
+        # Show spinner with elapsed time (left) and context usage (right)
+        spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        frame_idx = 0
+        with Live(console=console, refresh_per_second=1, transient=True) as live:
+            while thread.is_alive():
+                elapsed = int(time.time() - start_time)
+                width = console.width
+                left = f"{spinner_frames[frame_idx]} {elapsed}s"
+                right = f"{tokens} tokens ({pct:.0f}%)"
+                padding = width - len(left) - len(right) - 1
+
+                status_text = Text()
+                status_text.append(left, style="bold blue")
+                status_text.append(" " * max(1, padding))
+                status_text.append(right, style="dim")
+                live.update(status_text)
+
+                frame_idx = (frame_idx + 1) % len(spinner_frames)
+                thread.join(timeout=1.0)
+
+        if error:
+            raise error
+
         message = response.get("message", {})
 
         # Check for tool calls (structured or parsed from text)
@@ -278,7 +339,11 @@ def main():
 
     while True:
         try:
+            # Show context usage right-aligned above prompt
+            tokens, pct = get_context_usage(conversation.messages, system_prompt)
+            context_info = f"{tokens} tokens ({pct:.0f}%)"
             console.print()
+            console.print(f"[dim]{context_info:>{console.width - 1}}[/dim]")
             user_input = console.input("[bold blue]>[/bold blue] ")
 
             if not user_input.strip():
