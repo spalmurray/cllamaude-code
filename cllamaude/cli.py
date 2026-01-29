@@ -207,9 +207,9 @@ def run_agent_loop(conversation: Conversation, model: str, system_prompt: str) -
                     # Show result preview for read operations
                     if name == "read_file" and not result.startswith("Error"):
                         lines = result.split("\n")
-                        preview = "\n".join(lines[:10])
-                        if len(lines) > 10:
-                            preview += f"\n... ({len(lines) - 10} more lines)"
+                        preview = "\n".join(lines[:30])
+                        if len(lines) > 30:
+                            preview += f"\n... ({len(lines) - 30} more lines)"
                         console.print(Panel(preview, title="File contents", border_style="dim"))
                     elif name == "bash":
                         console.print(Panel(result, title="Output", border_style="dim"))
@@ -236,18 +236,43 @@ def main():
         default="glm-4.7-flash",
         help="Ollama model to use (default: glm-4.7-flash)"
     )
+    parser.add_argument(
+        "-s", "--session",
+        help="Session file to persist conversation"
+    )
+    parser.add_argument(
+        "prompt",
+        nargs="?",
+        help="Single prompt to run (non-interactive mode)"
+    )
     args = parser.parse_args()
 
+    # Load or create conversation
+    if args.session:
+        conversation = Conversation.load(args.session)
+        if conversation.messages:
+            console.print(f"[dim]Loaded {len(conversation.messages)} messages from session[/dim]")
+    else:
+        conversation = Conversation()
+
+    cwd = os.getcwd()
+    system_prompt = get_system_prompt(cwd)
+
+    # Non-interactive mode: run single prompt and exit
+    if args.prompt:
+        conversation.add_user_message(args.prompt)
+        run_agent_loop(conversation, args.model, system_prompt)
+        if args.session:
+            conversation.save(args.session)
+        return
+
+    # Interactive mode
     console.print(Panel(
         f"[bold]Cllamaude[/bold] - Ollama-powered coding assistant\n"
         f"Model: {args.model}\n"
         f"Type 'exit' or 'quit' to exit, 'clear' to reset conversation",
         border_style="blue",
     ))
-
-    conversation = Conversation()
-    cwd = os.getcwd()
-    system_prompt = get_system_prompt(cwd)
 
     while True:
         try:
@@ -269,12 +294,18 @@ def main():
             conversation.add_user_message(user_input)
             run_agent_loop(conversation, args.model, system_prompt)
 
+            if args.session:
+                conversation.save(args.session)
+
         except KeyboardInterrupt:
             console.print("\n[dim]Use 'exit' to quit[/dim]")
             continue
         except EOFError:
             console.print("\n[dim]Goodbye![/dim]")
             break
+
+    if args.session:
+        conversation.save(args.session)
 
 
 if __name__ == "__main__":

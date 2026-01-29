@@ -1,6 +1,8 @@
 """Conversation/message history management."""
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -8,6 +10,19 @@ class Conversation:
     """Manages the conversation history."""
 
     messages: list[dict] = field(default_factory=list)
+
+    def save(self, path: str) -> None:
+        """Save conversation to a JSON file."""
+        Path(path).write_text(json.dumps(self.messages, indent=2))
+
+    @classmethod
+    def load(cls, path: str) -> "Conversation":
+        """Load conversation from a JSON file."""
+        p = Path(path)
+        if p.exists():
+            messages = json.loads(p.read_text())
+            return cls(messages=messages)
+        return cls()
 
     def add_user_message(self, content: str) -> None:
         """Add a user message to the history."""
