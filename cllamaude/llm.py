@@ -43,7 +43,14 @@ You have access to the following tools:
 - write_file(path, content): Write content to a file
 - bash(command): Execute a bash command
 
-Use these tools to help the user with coding tasks. When you need to see file contents, read them. When you need to make changes, write them. When you need to run commands, use bash.
+Use these tools to help the user with coding tasks.
+
+## Important Rules
+
+- ALWAYS read a file before modifying it. Never assume you know what's in a file.
+- When editing files, preserve existing code. Only change what's necessary for the task.
+- Don't create new files in new directories unless explicitly asked. Work with existing project structure.
+- If you make a mistake (wrong file, wrong directory), clean up after yourself.
 
 ## Code Style
 
@@ -73,7 +80,7 @@ Be concise in your responses. Explain what you're doing briefly."""
 
 def chat(
     messages: list[dict],
-    model: str = "glm4:latest",
+    model: str = "glm-4.7-flash",
     system_prompt: str | None = None,
 ) -> dict:
     """Send a chat request to Ollama and return the response."""
@@ -95,7 +102,7 @@ def chat(
 
 def chat_stream(
     messages: list[dict],
-    model: str = "glm4:latest",
+    model: str = "glm-4.7-flash",
     system_prompt: str | None = None,
 ) -> Generator[dict, None, None]:
     """Stream a chat response from Ollama."""

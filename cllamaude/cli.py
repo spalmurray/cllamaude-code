@@ -32,17 +32,15 @@ def parse_tool_calls_from_text(content: str) -> list[dict] | None:
     if not content:
         return None
 
-    # Look for JSON objects that look like tool calls
-    # Pattern: {"name": "tool_name", ...}
-    json_pattern = r'\{[^{}]*"name"\s*:\s*"(\w+)"[^{}]*\}'
+    # Find potential tool call starts: {"name": "tool_name"
+    # Use a simple pattern that just finds the start, then brace-match to get full JSON
+    pattern = r'\{\s*"name"\s*:\s*"(read_file|write_file|bash)"'
 
     tool_calls = []
-    for match in re.finditer(json_pattern, content, re.DOTALL):
+    for match in re.finditer(pattern, content):
         try:
-            # Try to parse the JSON - but the regex might not capture nested braces
-            # So let's try to find the full JSON object starting from match
             start = match.start()
-            # Find matching brace
+            # Find matching closing brace
             brace_count = 0
             end = start
             for i, c in enumerate(content[start:]):
@@ -53,6 +51,9 @@ def parse_tool_calls_from_text(content: str) -> list[dict] | None:
                     if brace_count == 0:
                         end = start + i + 1
                         break
+
+            if end <= start:
+                continue
 
             json_str = content[start:end]
             data = json.loads(json_str)
@@ -232,8 +233,8 @@ def main():
     parser = argparse.ArgumentParser(description="Cllamaude - Ollama-powered coding CLI")
     parser.add_argument(
         "-m", "--model",
-        default="glm4:latest",
-        help="Ollama model to use (default: glm4:latest)"
+        default="glm-4.7-flash",
+        help="Ollama model to use (default: glm-4.7-flash)"
     )
     args = parser.parse_args()
 

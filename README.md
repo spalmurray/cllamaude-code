@@ -11,7 +11,7 @@ uv sync
 ## Usage
 
 ```bash
-# Run with default model (glm4:latest)
+# Run with default model (glm-4.7)
 uv run cllamaude
 
 # Run with a specific model
