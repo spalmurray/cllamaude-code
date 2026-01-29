@@ -34,7 +34,7 @@ def load_project_instructions(cwd: str) -> str | None:
 
 def get_system_prompt(cwd: str) -> str:
     """Generate the system prompt with context."""
-    prompt = f"""You are an expert coding assistant running in a terminal.
+    prompt = f"""You are Cllamaude, an AI coding assistant powered by local LLMs through Ollama. You run in a terminal and help users with software engineering tasks.
 
 Current working directory: {cwd}
 

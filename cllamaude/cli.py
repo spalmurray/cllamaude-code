@@ -287,6 +287,7 @@ def run_agent_loop(conversation: Conversation, model: str, system_prompt: str, a
         else:
             # No tool calls, just a text response
             if content:
+                conversation.add_assistant_message(content)
                 console.print()
                 console.print(Markdown(content))
             break
