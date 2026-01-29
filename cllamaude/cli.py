@@ -123,7 +123,7 @@ def is_path_in_cwd(path: str) -> bool:
         return False
 
 
-def confirm_tool(name: str, args: dict) -> bool:
+def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
     """Ask for confirmation before executing a destructive tool."""
     if name == "read_file":
         # Read is safe, no confirmation needed
@@ -167,10 +167,12 @@ def confirm_tool(name: str, args: dict) -> bool:
             border_style="yellow",
         ))
 
+    if auto_approve:
+        return True
     return Confirm.ask("Execute this?", default=True)
 
 
-def run_agent_loop(conversation: Conversation, model: str, system_prompt: str) -> None:
+def run_agent_loop(conversation: Conversation, model: str, system_prompt: str, auto_approve: bool = False) -> None:
     """Run the agent loop until no more tool calls."""
     while True:
         response = chat(conversation.messages, model=model, system_prompt=system_prompt)
@@ -199,7 +201,7 @@ def run_agent_loop(conversation: Conversation, model: str, system_prompt: str) -
                 console.print(f"[dim]Tool:[/dim] {format_tool_call(name, args)}")
 
                 # Confirm destructive operations
-                if not confirm_tool(name, args):
+                if not confirm_tool(name, args, auto_approve):
                     result = "Tool execution cancelled by user."
                     console.print("[yellow]Cancelled[/yellow]")
                 else:
@@ -261,7 +263,7 @@ def main():
     # Non-interactive mode: run single prompt and exit
     if args.prompt:
         conversation.add_user_message(args.prompt)
-        run_agent_loop(conversation, args.model, system_prompt)
+        run_agent_loop(conversation, args.model, system_prompt, auto_approve=True)
         if args.session:
             conversation.save(args.session)
         return
