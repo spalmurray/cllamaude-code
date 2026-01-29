@@ -1,10 +1,12 @@
 """Main CLI entry point for cllamaude."""
 
 import argparse
+import difflib
 import json
 import os
 import re
 import sys
+from pathlib import Path
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -88,6 +90,38 @@ def format_tool_call(name: str, args: dict) -> str:
     return f"{name}({args})"
 
 
+def make_diff(old_content: str, new_content: str, path: str) -> str:
+    """Generate a colored diff between old and new content."""
+    old_lines = old_content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+
+    diff = difflib.unified_diff(old_lines, new_lines, fromfile=path, tofile=path, lineterm="")
+
+    result = []
+    for line in diff:
+        line = line.rstrip('\n')
+        if line.startswith('+') and not line.startswith('+++'):
+            result.append(f"[green]{line}[/green]")
+        elif line.startswith('-') and not line.startswith('---'):
+            result.append(f"[red]{line}[/red]")
+        elif line.startswith('@@'):
+            result.append(f"[cyan]{line}[/cyan]")
+        else:
+            result.append(line)
+
+    return '\n'.join(result)
+
+
+def is_path_in_cwd(path: str) -> bool:
+    """Check if a path is inside the current working directory."""
+    try:
+        p = Path(path).expanduser().resolve()
+        cwd = Path.cwd().resolve()
+        return p.is_relative_to(cwd)
+    except Exception:
+        return False
+
+
 def confirm_tool(name: str, args: dict) -> bool:
     """Ask for confirmation before executing a destructive tool."""
     if name == "read_file":
@@ -97,12 +131,33 @@ def confirm_tool(name: str, args: dict) -> bool:
     console.print()
     if name == "write_file":
         path = args.get("path", "?")
-        content = args.get("content", "")
-        console.print(Panel(
-            Syntax(content, "text", theme="monokai", line_numbers=True),
-            title=f"Write to: {path}",
-            border_style="yellow",
-        ))
+        new_content = args.get("content", "")
+
+        # Try to read existing file for diff
+        old_content = ""
+        p = Path(path).expanduser()
+        if p.exists() and p.is_file():
+            try:
+                old_content = p.read_text()
+            except Exception:
+                pass
+
+        if old_content:
+            # Show diff
+            diff = make_diff(old_content, new_content, path)
+            console.print(Panel(diff, title=f"Changes to: {path}", border_style="yellow"))
+        else:
+            # New file, show full content
+            console.print(Panel(
+                Syntax(new_content, "text", theme="monokai", line_numbers=True),
+                title=f"Create: {path}",
+                border_style="yellow",
+            ))
+
+        # Auto-approve writes inside cwd
+        if is_path_in_cwd(path):
+            return True
+
     elif name == "bash":
         command = args.get("command", "?")
         console.print(Panel(
