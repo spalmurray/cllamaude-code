@@ -24,8 +24,7 @@ from .tools import execute_tool
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "write_file", "bash"}
-MAX_CONTEXT_TOKENS = 198000
+TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep"}
 
 
 def estimate_tokens(text: str) -> int:
@@ -33,7 +32,27 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-def get_context_usage(messages: list, system_prompt: str) -> tuple[int, float]:
+def summarize_tool_result(name: str, result: str, max_lines: int = 50) -> str:
+    """Summarize tool result to reduce context noise."""
+    if result.startswith("Error") or result.startswith("No "):
+        return result
+
+    # Don't summarize read_file - model needs exact content for accurate edits
+    if name == "read_file":
+        return result
+
+    lines = result.split("\n")
+    if len(lines) <= max_lines:
+        return result
+
+    if name in ("bash", "glob", "grep"):
+        # Truncate long discovery output
+        return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
+
+    return result
+
+
+def get_context_usage(messages: list, system_prompt: str, max_tokens: int = 32768) -> tuple[int, float]:
     """Calculate estimated token usage and percentage."""
     total_text = system_prompt
     for msg in messages:
@@ -41,7 +60,7 @@ def get_context_usage(messages: list, system_prompt: str) -> tuple[int, float]:
         if content:
             total_text += content
     tokens = estimate_tokens(total_text)
-    percentage = (tokens / MAX_CONTEXT_TOKENS) * 100
+    percentage = (tokens / max_tokens) * 100
     return tokens, percentage
 
 
@@ -56,7 +75,7 @@ def parse_tool_calls_from_text(content: str) -> list[dict] | None:
 
     # Find potential tool call starts: {"name": "tool_name"
     # Use a simple pattern that just finds the start, then brace-match to get full JSON
-    pattern = r'\{\s*"name"\s*:\s*"(read_file|write_file|bash)"'
+    pattern = r'\{\s*"name"\s*:\s*"(read_file|write_file|bash|edit_file|glob|grep)"'
 
     tool_calls = []
     for match in re.finditer(pattern, content):
@@ -106,10 +125,22 @@ def format_tool_call(name: str, args: dict) -> str:
     elif name == "write_file":
         path = args.get("path", "?")
         content = args.get("content", "")
-        preview = content[:100] + "..." if len(content) > 100 else content
         return f"write_file({path}, {len(content)} bytes)"
     elif name == "bash":
         return f"bash({args.get('command', '?')})"
+    elif name == "edit_file":
+        path = args.get("path", "?")
+        old = args.get("old_string", "")
+        new = args.get("new_string", "")
+        return f"edit_file({path}, {len(old)} -> {len(new)} chars)"
+    elif name == "glob":
+        return f"glob({args.get('pattern', '?')})"
+    elif name == "grep":
+        pattern = args.get("pattern", "?")
+        glob_pat = args.get("glob_pattern", "")
+        if glob_pat:
+            return f"grep({pattern}, {glob_pat})"
+        return f"grep({pattern})"
     return f"{name}({args})"
 
 
@@ -147,12 +178,25 @@ def is_path_in_cwd(path: str) -> bool:
 
 def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
     """Ask for confirmation before executing a destructive tool."""
-    if name == "read_file":
-        # Read is safe, no confirmation needed
+    if name in ("read_file", "glob", "grep"):
+        # Read operations are safe, no confirmation needed
         return True
 
     console.print()
-    if name == "write_file":
+    if name == "edit_file":
+        path = args.get("path", "?")
+        old_string = args.get("old_string", "")
+        new_string = args.get("new_string", "")
+
+        # Show what's being changed
+        diff = make_diff(old_string, new_string, path)
+        console.print(Panel(diff, title=f"Edit: {path}", border_style="yellow"))
+
+        # Auto-approve edits inside cwd
+        if is_path_in_cwd(path):
+            return True
+
+    elif name == "write_file":
         path = args.get("path", "?")
         new_content = args.get("content", "")
 
@@ -194,12 +238,17 @@ def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
     return Confirm.ask("Execute this?", default=True)
 
 
-def run_agent_loop(conversation: Conversation, model: str, system_prompt: str, auto_approve: bool = False) -> None:
+def run_agent_loop(
+    conversation: Conversation,
+    model: str,
+    system_prompt: str,
+    auto_approve: bool = False,
+    num_ctx: int = 32768,
+) -> None:
     """Run the agent loop until no more tool calls."""
     while True:
-        tokens, pct = get_context_usage(conversation.messages, system_prompt)
+        tokens, pct = get_context_usage(conversation.messages, system_prompt, num_ctx)
 
-        # Use threading to update elapsed time while waiting
         response = None
         error = None
         start_time = time.time()
@@ -207,17 +256,21 @@ def run_agent_loop(conversation: Conversation, model: str, system_prompt: str, a
         def do_chat():
             nonlocal response, error
             try:
-                response = chat(conversation.messages, model=model, system_prompt=system_prompt)
+                response = chat(
+                    conversation.messages,
+                    model=model,
+                    system_prompt=system_prompt,
+                    num_ctx=num_ctx,
+                )
             except Exception as e:
                 error = e
 
         thread = threading.Thread(target=do_chat)
         thread.start()
 
-        # Show spinner with elapsed time (left) and context usage (right)
         spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         frame_idx = 0
-        with Live(console=console, refresh_per_second=1, transient=True) as live:
+        with Live(console=console, refresh_per_second=10, transient=True) as live:
             while thread.is_alive():
                 elapsed = int(time.time() - start_time)
                 width = console.width
@@ -232,7 +285,7 @@ def run_agent_loop(conversation: Conversation, model: str, system_prompt: str, a
                 live.update(status_text)
 
                 frame_idx = (frame_idx + 1) % len(spinner_frames)
-                thread.join(timeout=1.0)
+                thread.join(timeout=0.1)
 
         if error:
             raise error
@@ -267,22 +320,27 @@ def run_agent_loop(conversation: Conversation, model: str, system_prompt: str, a
                     console.print("[yellow]Cancelled[/yellow]")
                 else:
                     result = execute_tool(name, args)
-                    # Show result preview for read operations
-                    if name == "read_file" and not result.startswith("Error"):
+                    # Show result preview for some operations
+                    if name == "read_file":
                         lines = result.split("\n")
-                        preview = "\n".join(lines[:30])
-                        if len(lines) > 30:
-                            preview += f"\n... ({len(lines) - 30} more lines)"
-                        console.print(Panel(preview, title="File contents", border_style="dim"))
+                        console.print(f"[dim]Read {len(lines)} lines[/dim]")
                     elif name == "bash":
                         console.print(Panel(result, title="Output", border_style="dim"))
+                    elif name in ("glob", "grep") and not result.startswith(("Error", "No ")):
+                        lines = result.split("\n")
+                        preview = "\n".join(lines[:20])
+                        if len(lines) > 20:
+                            preview += f"\n... ({len(lines) - 20} more)"
+                        console.print(Panel(preview, title=f"{name} results", border_style="dim"))
                     else:
                         console.print(f"[dim]{result}[/dim]")
 
+                # Summarize result to reduce context bloat
+                summarized = summarize_tool_result(name, result)
                 conversation.add_tool_result(
                     tool_call_id=str(id(tool_call)),
                     name=name,
-                    result=result,
+                    result=summarized,
                 )
         else:
             # No tool calls, just a text response
@@ -305,6 +363,12 @@ def main():
         help="Session file to persist conversation"
     )
     parser.add_argument(
+        "-c", "--context",
+        type=int,
+        default=32768,
+        help="Context window size in tokens (default: 32768)"
+    )
+    parser.add_argument(
         "prompt",
         nargs="?",
         help="Single prompt to run (non-interactive mode)"
@@ -325,7 +389,13 @@ def main():
     # Non-interactive mode: run single prompt and exit
     if args.prompt:
         conversation.add_user_message(args.prompt)
-        run_agent_loop(conversation, args.model, system_prompt, auto_approve=True)
+        run_agent_loop(
+            conversation,
+            args.model,
+            system_prompt,
+            auto_approve=True,
+            num_ctx=args.context,
+        )
         if args.session:
             conversation.save(args.session)
         return
@@ -341,7 +411,7 @@ def main():
     while True:
         try:
             # Show context usage right-aligned above prompt
-            tokens, pct = get_context_usage(conversation.messages, system_prompt)
+            tokens, pct = get_context_usage(conversation.messages, system_prompt, args.context)
             context_info = f"{tokens} tokens ({pct:.0f}%)"
             console.print()
             console.print(f"[dim]{context_info:>{console.width - 1}}[/dim]")
@@ -360,7 +430,12 @@ def main():
                 continue
 
             conversation.add_user_message(user_input)
-            run_agent_loop(conversation, args.model, system_prompt)
+            run_agent_loop(
+                conversation,
+                args.model,
+                system_prompt,
+                num_ctx=args.context,
+            )
 
             if args.session:
                 conversation.save(args.session)
