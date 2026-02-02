@@ -78,10 +78,12 @@ PLANNING_BLOCKED_TOOLS = {"write_file", "edit_file", "bash", "undo_changes"}
 EXECUTE_TRIGGERS = {"do it", "ok", "go", "execute", "proceed", "yes", "run it", "looks good", "lgtm"}
 
 
-def start_new_turn() -> None:
-    """Called when user sends a new prompt."""
+def start_new_turn(messages: list | None = None) -> None:
+    """Called when user sends a new prompt. Compresses outputs from previous turn."""
     global current_turn
     current_turn += 1
+    if messages is not None:
+        compress_old_tool_outputs(messages)
 
 
 def record_change(path: str, old_content: str | None, new_content: str, operation: str) -> None:
@@ -904,8 +906,13 @@ def run_agent_loop(
                         console.print(Panel(result, title=f"Output{id_suffix}", border_style="dim"))
                     elif name == "git" and not result.startswith("Error"):
                         lines = result.split("\n")
-                        title = f"git output ({len(lines)} lines){id_suffix}"
-                        console.print(Panel(result, title=title, border_style="dim"))
+                        op = args.get("operation", "")
+                        # Don't show full diff output, just summary
+                        if op in ("diff", "diff_staged", "blame", "show"):
+                            console.print(f"[dim]git {op}: {len(lines)} lines{id_suffix}[/dim]")
+                        else:
+                            title = f"git {op}{id_suffix}"
+                            console.print(Panel(result, title=title, border_style="dim"))
                     elif name in ("glob", "grep") and not result.startswith(("Error", "No ")):
                         lines = result.split("\n")
                         preview = "\n".join(lines[:20])
@@ -926,8 +933,6 @@ def run_agent_loop(
                     output_id=output_id,
                 )
 
-            # Compress old file reads to save context
-            compress_old_tool_outputs(conversation.messages)
         else:
             # No tool calls, just a text response
             if content:
@@ -982,7 +987,7 @@ def main():
 
     # Non-interactive mode: run single prompt and exit
     if args.prompt:
-        start_new_turn()
+        start_new_turn(conversation.messages)
         conversation.add_user_message(args.prompt)
         run_agent_loop(
             conversation,
@@ -1048,7 +1053,7 @@ def main():
                     f"[dim]Say 'do it' to execute, or give feedback to adjust.[/dim]",
                     border_style="cyan",
                 ))
-                start_new_turn()
+                start_new_turn(conversation.messages)
                 conversation.add_user_message(task)
                 run_agent_loop(
                     conversation,
@@ -1072,7 +1077,7 @@ def main():
             if plan_mode and user_input.strip().lower() in EXECUTE_TRIGGERS:
                 plan_mode = False
                 console.print("[cyan]Executing plan...[/cyan]")
-                start_new_turn()
+                start_new_turn(conversation.messages)
                 conversation.add_user_message("Execute the plan now. Use the tools to make the changes.")
                 run_agent_loop(
                     conversation,
@@ -1088,7 +1093,7 @@ def main():
             # Exit plan mode on other input (feedback or new task)
             if plan_mode:
                 # User is giving feedback on the plan
-                start_new_turn()
+                start_new_turn(conversation.messages)
                 conversation.add_user_message(user_input)
                 run_agent_loop(
                     conversation,
@@ -1102,7 +1107,7 @@ def main():
                     conversation.save(args.session)
                 continue
 
-            start_new_turn()
+            start_new_turn(conversation.messages)
             conversation.add_user_message(user_input)
             run_agent_loop(
                 conversation,
