@@ -27,7 +27,7 @@ from .tools import execute_tool
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file"}
+TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "git"}
 
 
 @dataclass
@@ -438,6 +438,12 @@ def format_tool_call(name: str, args: dict) -> str:
         return f"ask_user({preview})"
     elif name == "remember_file":
         return f"remember_file({args.get('path', '?')})"
+    elif name == "git":
+        op = args.get("operation", "?")
+        extra = args.get("args", "")
+        if extra:
+            return f"git {op} {extra}"
+        return f"git {op}"
     return f"{name}({args})"
 
 

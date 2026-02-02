@@ -193,6 +193,28 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "git",
+            "description": "Run read-only git commands to understand repository state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["status", "diff", "diff_staged", "log", "branch", "show", "blame"],
+                        "description": "The git operation to run",
+                    },
+                    "args": {
+                        "type": "string",
+                        "description": "Additional arguments (e.g., file path for blame/diff, commit hash for show, -n 5 for log)",
+                    },
+                },
+                "required": ["operation"],
+            },
+        },
+    },
 ]
 
 
@@ -373,6 +395,54 @@ def grep_files(pattern: str, path: str | None = None, glob_pattern: str | None =
         return f"Error searching: {e}"
 
 
+def git_command(operation: str, args: str | None = None) -> str:
+    """Run read-only git commands."""
+    commands = {
+        "status": "git status",
+        "diff": "git diff",
+        "diff_staged": "git diff --staged",
+        "log": "git log --oneline -20",
+        "branch": "git branch -a",
+        "show": "git show",
+        "blame": "git blame",
+    }
+
+    if operation not in commands:
+        return f"Error: Unknown git operation: {operation}"
+
+    cmd = commands[operation]
+
+    # Append args if provided
+    if args:
+        # For log, allow overriding the default -20
+        if operation == "log" and args.strip().startswith("-n"):
+            cmd = f"git log --oneline {args}"
+        else:
+            cmd = f"{cmd} {args}"
+
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=os.getcwd(),
+        )
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            if output:
+                output += "\n"
+            output += result.stderr
+        return output if output else "(no output)"
+    except subprocess.TimeoutExpired:
+        return "Error: Git command timed out"
+    except Exception as e:
+        return f"Error running git: {e}"
+
+
 TOOL_FUNCTIONS = {
     "read_file": read_file,
     "write_file": write_file,
@@ -380,6 +450,7 @@ TOOL_FUNCTIONS = {
     "edit_file": edit_file,
     "glob": glob_files,
     "grep": grep_files,
+    "git": git_command,
 }
 
 

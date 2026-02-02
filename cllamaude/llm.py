@@ -47,6 +47,7 @@ You have access to the following tools:
 - undo_changes(turns?): Undo file changes from recent turns. Default 1 turn. Use when user asks to undo/revert.
 - ask_user(question): Ask the user a question and wait for their response. Use this to clarify requirements before making changes.
 - remember_file(path): Mark a file as important to keep in context. Old file reads get compressed automatically - use this on files you'll need to reference later.
+- git(operation, args?): Run read-only git commands. Operations: status, diff, diff_staged, log, branch, show, blame. Args are optional (e.g., file path for blame, commit hash for show).
 
 Use these tools to help the user with coding tasks.
 
