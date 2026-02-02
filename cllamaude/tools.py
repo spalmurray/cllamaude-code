@@ -159,6 +159,23 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user",
+            "description": "Ask the user a question and wait for their response. Use this to clarify requirements, get preferences, or confirm before taking action.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the user",
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
 ]
 
 

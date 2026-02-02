@@ -45,6 +45,7 @@ You have access to the following tools:
 - glob(pattern, path?): Find files matching a glob pattern (e.g., "**/*.py", "src/*.js")
 - grep(pattern, path?, glob_pattern?): Search for a regex pattern in files. Returns file:line:content.
 - undo_changes(turns?): Undo file changes from recent turns. Default 1 turn. Use when user asks to undo/revert.
+- ask_user(question): Ask the user a question and wait for their response. Use this to clarify requirements before making changes.
 
 Use these tools to help the user with coding tasks.
 

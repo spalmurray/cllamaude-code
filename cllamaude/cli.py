@@ -27,7 +27,7 @@ from .tools import execute_tool
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes"}
+TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user"}
 
 
 @dataclass
@@ -413,6 +413,10 @@ def format_tool_call(name: str, args: dict) -> str:
         if glob_pat:
             return f"grep({pattern}, {glob_pat})"
         return f"grep({pattern})"
+    elif name == "ask_user":
+        question = args.get("question", "?")
+        preview = question[:50] + "..." if len(question) > 50 else question
+        return f"ask_user({preview})"
     return f"{name}({args})"
 
 
@@ -713,6 +717,13 @@ def run_agent_loop(
                     num_turns = args.get("turns", 1) or 1
                     result = undo_turns(num_turns)
                     console.print(Panel(result, title="Undo", border_style="green"))
+                # Handle ask_user specially (requires user interaction)
+                elif name == "ask_user":
+                    question = args.get("question", "")
+                    console.print(Panel(question, title="🤔 Agent Question", border_style="cyan"))
+                    result = console.input("[bold cyan]Your answer:[/bold cyan] ")
+                    if not result.strip():
+                        result = "(no answer provided)"
                 # Confirm destructive operations
                 elif not confirm_tool(name, args, auto_approve):
                     result = "Tool execution cancelled by user."
