@@ -6,6 +6,22 @@ import re
 import subprocess
 from pathlib import Path
 
+# Directories to ignore in glob/grep
+IGNORED_DIRS = {
+    ".venv", "venv", "node_modules", ".git", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".tox", "dist", "build",
+    ".eggs", "*.egg-info", ".cache", ".ruff_cache",
+}
+
+
+def should_ignore_path(path: Path) -> bool:
+    """Check if a path should be ignored based on IGNORED_DIRS."""
+    parts = path.parts
+    for part in parts:
+        if part in IGNORED_DIRS or part.endswith(".egg-info"):
+            return True
+    return False
+
 # Tool definitions in Ollama/OpenAI format
 TOOLS = [
     {
@@ -382,8 +398,11 @@ def glob_files(pattern: str, path: str | None = None) -> str:
             return f"Error: Path not found: {path}"
 
         matches = sorted(base.glob(pattern))
-        # Filter to files only
-        files = [str(m.relative_to(base)) for m in matches if m.is_file()]
+        # Filter to files only, excluding ignored directories
+        files = [
+            str(m.relative_to(base)) for m in matches
+            if m.is_file() and not should_ignore_path(m.relative_to(base))
+        ]
 
         if not files:
             return f"No files found matching '{pattern}'"
@@ -414,11 +433,17 @@ def grep_files(pattern: str, path: str | None = None, glob_pattern: str | None =
         if base.is_file():
             files = [base]
         else:
-            # Get all files, optionally filtered by glob
+            # Get all files, optionally filtered by glob, excluding ignored directories
             if glob_pattern:
-                files = [f for f in base.rglob(glob_pattern) if f.is_file()]
+                files = [
+                    f for f in base.rglob(glob_pattern)
+                    if f.is_file() and not should_ignore_path(f.relative_to(base))
+                ]
             else:
-                files = [f for f in base.rglob("*") if f.is_file()]
+                files = [
+                    f for f in base.rglob("*")
+                    if f.is_file() and not should_ignore_path(f.relative_to(base))
+                ]
 
         for file_path in files:
             if len(results) >= max_results:

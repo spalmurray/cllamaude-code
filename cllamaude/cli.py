@@ -293,13 +293,38 @@ def remember_file(path: str) -> str:
     return f"Will keep {path} in context"
 
 
-def forget_file(path: str) -> str:
-    """Un-remember a file, allowing it to be compressed."""
+def forget_file(path: str, messages: list | None = None) -> str:
+    """Un-remember a file and immediately compress it in context."""
     path_normalized = str(Path(path).expanduser().resolve())
-    if path_normalized in remembered_files:
-        remembered_files.discard(path_normalized)
-        return f"Forgot {path} - will be compressed"
-    return f"{path} was not remembered"
+    remembered_files.discard(path_normalized)
+
+    if messages is None:
+        return f"Forgot {path}"
+
+    # Immediately compress this file in conversation
+    compressed_count = 0
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "tool" and msg.get("name") == "read_file":
+            content = msg.get("content", "")
+            if content.startswith("[File:") or content.startswith("Error"):
+                continue
+
+            # Check if this is our file
+            if i > 0:
+                prev = messages[i - 1]
+                tool_calls = prev.get("tool_calls", [])
+                for tc in tool_calls:
+                    if tc.get("function", {}).get("name") == "read_file":
+                        tc_path = tc.get("function", {}).get("arguments", {}).get("path", "")
+                        tc_normalized = str(Path(tc_path).expanduser().resolve()) if tc_path else ""
+                        if tc_normalized == path_normalized:
+                            msg["content"] = compress_file_content(path, content)
+                            compressed_count += 1
+                            break
+
+    if compressed_count > 0:
+        return f"Forgot {path} ({compressed_count} read(s) compressed)"
+    return f"Forgot {path}"
 
 
 def summarize_tool_output(name: str, args: dict, result: str) -> str:
@@ -364,14 +389,46 @@ def remember_output(output_id: int | None = None) -> str:
     return f"Remembered output #{output_id}"
 
 
-def forget_output(output_id: int | None = None) -> str:
-    """Forget a tool output by ID. If no ID, forgets the most recent."""
+def forget_output(output_id: int | None = None, messages: list | None = None) -> str:
+    """Forget a tool output by ID and immediately compress it."""
     if output_id is None:
         output_id = tool_output_counter
-    if output_id in remembered_outputs:
-        remembered_outputs.discard(output_id)
-        return f"Forgot output #{output_id} - will be compressed"
-    return f"Output #{output_id} was not remembered"
+
+    remembered_outputs.discard(output_id)
+
+    if messages is None:
+        return f"Forgot output #{output_id}"
+
+    # Immediately compress this output in conversation
+    for msg in messages:
+        if msg.get("role") == "tool" and msg.get("output_id") == output_id:
+            content = msg.get("content", "")
+            name = msg.get("name", "")
+
+            # Skip if already compressed or error
+            if content.startswith("[") or content.startswith("Error") or content.startswith("No "):
+                continue
+
+            # Find args from preceding message
+            idx = messages.index(msg)
+            args = {}
+            if idx > 0:
+                prev = messages[idx - 1]
+                tool_calls = prev.get("tool_calls", [])
+                for tc in tool_calls:
+                    if tc.get("function", {}).get("name") == name:
+                        args = tc.get("function", {}).get("arguments", {})
+                        break
+
+            if name == "read_file":
+                path = args.get("path", "unknown")
+                msg["content"] = compress_file_content(path, content)
+            else:
+                msg["content"] = summarize_tool_output(name, args, content)
+
+            return f"Forgot and compressed output #{output_id}"
+
+    return f"Forgot output #{output_id}"
 
 
 def compress_old_tool_outputs(messages: list, keep_recent: int = 1) -> None:
@@ -851,20 +908,20 @@ def run_agent_loop(
                     file_path = args.get("path", "")
                     result = remember_file(file_path)
                     console.print(f"[dim]{result}[/dim]")
-                # Handle forget_file specially (un-remembers a file)
+                # Handle forget_file specially (un-remembers and compresses immediately)
                 elif name == "forget_file":
                     file_path = args.get("path", "")
-                    result = forget_file(file_path)
+                    result = forget_file(file_path, conversation.messages)
                     console.print(f"[dim]{result}[/dim]")
                 # Handle remember_output specially
                 elif name == "remember_output":
                     oid = args.get("output_id")
                     result = remember_output(oid)
                     console.print(f"[dim]{result}[/dim]")
-                # Handle forget_output specially
+                # Handle forget_output specially (compresses immediately)
                 elif name == "forget_output":
                     oid = args.get("output_id")
-                    result = forget_output(oid)
+                    result = forget_output(oid, conversation.messages)
                     console.print(f"[dim]{result}[/dim]")
                 # Confirm destructive operations
                 elif not confirm_tool(name, args, auto_approve):

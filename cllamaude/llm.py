@@ -57,11 +57,19 @@ Use these tools to help the user with coding tasks.
 - Use grep to search for code patterns across the codebase
 
 ## Context Management
-- Tool outputs (file reads, git, bash, grep, glob) are automatically compressed after use to save context space.
-- If you need to reference an output later, call remember_file(path) for files or remember_output() for command outputs IMMEDIATELY after.
-- Outputs have IDs shown like [output #5] - use these with remember_output(5) if needed.
-- If you don't remember, you'll need to re-run the command.
-- Only remember what you actually need - don't remember everything.
+Tool outputs (file reads, git, bash, grep, glob) are compressed to save context space.
+
+**Within a turn**: You have full access to all outputs. No action needed.
+
+**Between turns**: Old outputs get compressed automatically. To control this:
+- `remember_file(path)` / `remember_output(id)` - Keep across turns (for files you'll edit later)
+- `forget_file(path)` / `forget_output(id)` - Compress immediately (when you realize something isn't useful)
+
+Typical workflow:
+1. Read several files exploring the codebase
+2. Find the relevant one, call `remember_file(path)` on it
+3. Call `forget_file(path)` on the irrelevant ones to free context now
+4. Edit the remembered file
 
 ## Before You Start
 
