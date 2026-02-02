@@ -2,7 +2,6 @@
 
 import ollama
 from pathlib import Path
-from typing import Generator
 
 from .tools import TOOLS
 
@@ -53,11 +52,17 @@ Use these tools to help the user with coding tasks.
 - Use glob to find files before reading them
 - Use grep to search for code patterns across the codebase
 
+## Before You Start
+
+- If the user's request is vague or could apply to multiple files/locations, ASK for clarification first. Don't guess.
+- Ask things like: "Which file should I modify?" or "I see several configs - do you mean X or Y?"
+- One good clarifying question saves many wasted tool calls.
+- But if the user gives specific file paths or clear instructions, act immediately.
+
 ## Conversation Awareness
 
 - Pay close attention to what the user has already told you. Don't ask questions that were already answered.
 - Remember files you've already read. Don't re-read the same file unless the user says it changed.
-- When given a task, start implementing immediately. Don't ask clarifying questions unless truly ambiguous.
 - If you find yourself confused, re-read the recent conversation before asking the user.
 
 ## Important Rules
@@ -125,25 +130,3 @@ def chat(
     return response
 
 
-def chat_stream(
-    messages: list[dict],
-    model: str = "glm-4.7-flash",
-    system_prompt: str | None = None,
-    num_ctx: int = 32768,
-) -> Generator[dict, None, None]:
-    """Stream a chat response from Ollama."""
-    full_messages = []
-
-    if system_prompt:
-        full_messages.append({"role": "system", "content": system_prompt})
-
-    full_messages.extend(messages)
-
-    for chunk in ollama.chat(
-        model=model,
-        messages=full_messages,
-        tools=TOOLS,
-        options={"num_ctx": num_ctx},
-        stream=True,
-    ):
-        yield chunk

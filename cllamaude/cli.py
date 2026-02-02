@@ -13,7 +13,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Confirm
 from rich.syntax import Syntax
 from rich.live import Live
 from rich.text import Text
@@ -30,6 +30,152 @@ TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep"}
 def estimate_tokens(text: str) -> int:
     """Estimate token count (roughly 4 chars per token)."""
     return len(text) // 4
+
+
+def get_attr(obj, key, default=None):
+    """Get attribute from dict or object."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def detect_language(path: str) -> str:
+    """Detect programming language from file extension."""
+    ext_map = {
+        ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+        ".jsx": "JSX", ".tsx": "TSX", ".rb": "Ruby", ".go": "Go",
+        ".rs": "Rust", ".java": "Java", ".c": "C", ".cpp": "C++",
+        ".h": "C Header", ".hpp": "C++ Header", ".cs": "C#",
+        ".php": "PHP", ".swift": "Swift", ".kt": "Kotlin",
+        ".scala": "Scala", ".sh": "Shell", ".bash": "Bash",
+        ".zsh": "Zsh", ".fish": "Fish", ".ps1": "PowerShell",
+        ".sql": "SQL", ".html": "HTML", ".css": "CSS",
+        ".scss": "SCSS", ".sass": "Sass", ".less": "Less",
+        ".json": "JSON", ".yaml": "YAML", ".yml": "YAML",
+        ".toml": "TOML", ".xml": "XML", ".md": "Markdown",
+        ".txt": "Text", ".cfg": "Config", ".ini": "INI",
+    }
+    ext = Path(path).suffix.lower()
+    return ext_map.get(ext, "Unknown")
+
+
+def extract_file_structure(content: str, language: str) -> dict:
+    """Extract imports, classes, and functions from file content."""
+    lines = content.split("\n")
+    imports = []
+    classes = []
+    functions = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Python
+        if language == "Python":
+            if stripped.startswith("import ") or stripped.startswith("from "):
+                imports.append(stripped.split("#")[0].strip())
+            elif stripped.startswith("class "):
+                match = re.match(r"class\s+(\w+)", stripped)
+                if match:
+                    classes.append(match.group(1))
+            elif stripped.startswith("def "):
+                match = re.match(r"def\s+(\w+)", stripped)
+                if match:
+                    functions.append(match.group(1))
+
+        # JavaScript/TypeScript
+        elif language in ("JavaScript", "TypeScript", "JSX", "TSX"):
+            if stripped.startswith("import "):
+                imports.append(stripped.split("//")[0].strip())
+            elif "require(" in stripped:
+                imports.append(stripped.split("//")[0].strip())
+            elif stripped.startswith("class "):
+                match = re.match(r"class\s+(\w+)", stripped)
+                if match:
+                    classes.append(match.group(1))
+            elif stripped.startswith("function ") or stripped.startswith("async function "):
+                match = re.match(r"(?:async\s+)?function\s+(\w+)", stripped)
+                if match:
+                    functions.append(match.group(1))
+            elif re.match(r"(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", stripped):
+                match = re.match(r"(?:const|let|var)\s+(\w+)", stripped)
+                if match:
+                    functions.append(match.group(1))
+
+        # Go
+        elif language == "Go":
+            if stripped.startswith("import "):
+                imports.append(stripped)
+            elif stripped.startswith("type ") and " struct" in stripped:
+                match = re.match(r"type\s+(\w+)", stripped)
+                if match:
+                    classes.append(match.group(1))
+            elif stripped.startswith("func "):
+                match = re.match(r"func\s+(?:\([^)]+\)\s+)?(\w+)", stripped)
+                if match:
+                    functions.append(match.group(1))
+
+    return {
+        "imports": imports[:10],  # Limit to avoid bloat
+        "classes": classes[:10],
+        "functions": functions[:15],
+    }
+
+
+def compress_file_content(path: str, content: str) -> str:
+    """Compress file content into a summary."""
+    if content.startswith("Error") or content.startswith("[Lines"):
+        return content  # Already an error or a line range read
+
+    lines = content.split("\n")
+    line_count = len(lines)
+    language = detect_language(path)
+    structure = extract_file_structure(content, language)
+
+    summary_parts = [f"[File: {path}, {line_count} lines, {language}]"]
+
+    if structure["imports"]:
+        summary_parts.append(f"Imports: {', '.join(structure['imports'][:5])}")
+        if len(structure["imports"]) > 5:
+            summary_parts[-1] += f" (+{len(structure['imports']) - 5} more)"
+
+    if structure["classes"]:
+        summary_parts.append(f"Classes: {', '.join(structure['classes'])}")
+
+    if structure["functions"]:
+        summary_parts.append(f"Functions: {', '.join(structure['functions'][:10])}")
+        if len(structure["functions"]) > 10:
+            summary_parts[-1] += f" (+{len(structure['functions']) - 10} more)"
+
+    return "\n".join(summary_parts)
+
+
+def compress_old_file_reads(messages: list, keep_recent: int = 2) -> None:
+    """Compress old read_file results in conversation history in-place."""
+    # Find all tool result messages with read_file
+    read_file_indices = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "tool" and msg.get("name") == "read_file":
+            content = msg.get("content", "")
+            # Skip if already compressed or is an error
+            if not content.startswith("[File:") and not content.startswith("Error"):
+                read_file_indices.append(i)
+
+    # Keep the most recent ones, compress the rest
+    to_compress = read_file_indices[:-keep_recent] if len(read_file_indices) > keep_recent else []
+
+    for idx in to_compress:
+        msg = messages[idx]
+        # Try to get the path from the preceding assistant message's tool call
+        path = "unknown"
+        if idx > 0:
+            prev = messages[idx - 1]
+            tool_calls = prev.get("tool_calls", [])
+            for tc in tool_calls:
+                if tc.get("function", {}).get("name") == "read_file":
+                    path = tc.get("function", {}).get("arguments", {}).get("path", "unknown")
+                    break
+
+        msg["content"] = compress_file_content(path, msg["content"])
 
 
 def summarize_tool_result(name: str, result: str, max_lines: int = 50) -> str:
@@ -176,6 +322,96 @@ def is_path_in_cwd(path: str) -> bool:
         return False
 
 
+def is_safe_bash_command(command: str) -> bool:
+    """Check if a bash command is safe to auto-approve."""
+    import shlex
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+
+    if not parts:
+        return False
+
+    cmd = parts[0]
+    cwd = Path.cwd().resolve()
+
+    # ls, find, grep are safe if targeting cwd or subdirectories
+    if cmd in ("ls", "find", "grep"):
+        # If no path argument, it's cwd (safe)
+        # Check all non-flag arguments to see if they're in cwd
+        for part in parts[1:]:
+            if part.startswith("-"):
+                continue  # Skip flags
+            # Check if path is in cwd
+            try:
+                p = Path(part).expanduser().resolve()
+                if not p.is_relative_to(cwd):
+                    return False
+            except Exception:
+                return False
+        return True
+
+    return False
+
+
+def is_dangerous_git_command(command: str) -> str | None:
+    """Check if a command is a dangerous git operation. Returns warning message or None."""
+    import shlex
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+
+    if not parts:
+        return None
+
+    # Check for git commands
+    if parts[0] != "git":
+        return None
+
+    if len(parts) < 2:
+        return None
+
+    subcommand = parts[1]
+
+    # Block these entirely
+    blocked = {
+        "commit": "Git commits are blocked. Make commits manually.",
+        "push": "Git push is blocked. Push manually after reviewing changes.",
+        "reset": "Git reset is blocked. Reset manually if needed.",
+        "checkout": None,  # Only block specific patterns
+        "clean": "Git clean is blocked. Clean manually if needed.",
+        "rebase": "Git rebase is blocked. Rebase manually.",
+        "merge": "Git merge is blocked. Merge manually.",
+        "branch": None,  # Only block -D
+        "stash": None,  # stash drop is dangerous
+    }
+
+    if subcommand in blocked and blocked[subcommand]:
+        return blocked[subcommand]
+
+    # Check for dangerous flags/patterns
+    if subcommand == "checkout":
+        # Block `git checkout .` or `git checkout -- .` (discard all changes)
+        if "." in parts or "--" in parts:
+            return "Git checkout that discards changes is blocked."
+
+    if subcommand == "branch":
+        # Block force delete
+        if "-D" in parts:
+            return "Force branch deletion (-D) is blocked. Use -d for safe delete."
+
+    if subcommand == "stash":
+        if "drop" in parts or "clear" in parts:
+            return "Git stash drop/clear is blocked."
+
+    if subcommand == "reset":
+        return "Git reset is blocked. Reset manually if needed."
+
+    return None
+
+
 def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
     """Ask for confirmation before executing a destructive tool."""
     if name in ("read_file", "glob", "grep"):
@@ -227,6 +463,21 @@ def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
 
     elif name == "bash":
         command = args.get("command", "?")
+
+        # Block dangerous git commands entirely
+        git_warning = is_dangerous_git_command(command)
+        if git_warning:
+            console.print(Panel(
+                f"[red]{git_warning}[/red]\n\nBlocked command: {command}",
+                title="🚫 Blocked",
+                border_style="red",
+            ))
+            return False
+
+        # Auto-approve safe read-only commands in cwd
+        if is_safe_bash_command(command):
+            return True
+
         console.print(Panel(
             command,
             title="Execute bash command",
@@ -244,11 +495,13 @@ def run_agent_loop(
     system_prompt: str,
     auto_approve: bool = False,
     num_ctx: int = 32768,
+    debug: bool = False,
 ) -> None:
     """Run the agent loop until no more tool calls."""
     while True:
         tokens, pct = get_context_usage(conversation.messages, system_prompt, num_ctx)
 
+        # Non-streaming request with spinner
         response = None
         error = None
         start_time = time.time()
@@ -290,11 +543,18 @@ def run_agent_loop(
         if error:
             raise error
 
-        message = response.get("message", {})
+        message = get_attr(response, "message", {})
+
+        # Debug: show raw message
+        if debug:
+            console.print(f"[dim]DEBUG message: {message}[/dim]")
 
         # Check for tool calls (structured or parsed from text)
-        tool_calls = message.get("tool_calls")
-        content = message.get("content", "")
+        tool_calls = get_attr(message, "tool_calls")
+        content = get_attr(message, "content", "")
+
+        if debug:
+            console.print(f"[dim]DEBUG tool_calls: {tool_calls}, type: {type(tool_calls)}[/dim]")
 
         # If no structured tool calls, try to parse from text
         if not tool_calls and content:
@@ -342,12 +602,17 @@ def run_agent_loop(
                     name=name,
                     result=summarized,
                 )
+
+            # Compress old file reads to save context
+            compress_old_file_reads(conversation.messages)
         else:
             # No tool calls, just a text response
             if content:
                 conversation.add_assistant_message(content)
                 console.print()
                 console.print(Markdown(content))
+            else:
+                console.print("[dim](no response)[/dim]")
             break
 
 
@@ -367,6 +632,11 @@ def main():
         type=int,
         default=32768,
         help="Context window size in tokens (default: 32768)"
+    )
+    parser.add_argument(
+        "-d", "--debug",
+        action="store_true",
+        help="Show debug info (raw model responses)"
     )
     parser.add_argument(
         "prompt",
@@ -395,6 +665,7 @@ def main():
             system_prompt,
             auto_approve=True,
             num_ctx=args.context,
+            debug=args.debug,
         )
         if args.session:
             conversation.save(args.session)
@@ -435,6 +706,7 @@ def main():
                 args.model,
                 system_prompt,
                 num_ctx=args.context,
+                debug=args.debug,
             )
 
             if args.session:
