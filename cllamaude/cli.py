@@ -345,7 +345,7 @@ def summarize_tool_result(name: str, result: str, max_lines: int = 50) -> str:
     if len(lines) <= max_lines:
         return result
 
-    if name in ("bash", "glob", "grep"):
+    if name in ("bash", "glob", "grep", "git"):
         # Truncate long discovery output
         return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
 
@@ -582,7 +582,7 @@ def is_dangerous_git_command(command: str) -> str | None:
 
 def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
     """Ask for confirmation before executing a destructive tool."""
-    if name in ("read_file", "glob", "grep"):
+    if name in ("read_file", "glob", "grep", "git"):
         # Read operations are safe, no confirmation needed
         return True
 
@@ -806,6 +806,10 @@ def run_agent_loop(
                         console.print(f"[dim]Read {len(lines)} lines[/dim]")
                     elif name == "bash":
                         console.print(Panel(result, title="Output", border_style="dim"))
+                    elif name == "git" and not result.startswith("Error"):
+                        lines = result.split("\n")
+                        title = f"git output ({len(lines)} lines)"
+                        console.print(Panel(result, title=title, border_style="dim"))
                     elif name in ("glob", "grep") and not result.startswith(("Error", "No ")):
                         lines = result.split("\n")
                         preview = "\n".join(lines[:20])
