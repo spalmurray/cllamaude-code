@@ -213,6 +213,40 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "remember_output",
+            "description": "Remember a tool output to keep it in context. By default, old outputs (git, bash, grep, glob) get compressed. Use this on outputs you need to reference later.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "output_id": {
+                        "type": "integer",
+                        "description": "The output ID to remember. If not provided, remembers the most recent output.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_output",
+            "description": "Un-remember a tool output, allowing it to be compressed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "output_id": {
+                        "type": "integer",
+                        "description": "The output ID to forget. If not provided, forgets the most recent output.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git",
             "description": "Run read-only git commands to understand repository state.",
             "parameters": {

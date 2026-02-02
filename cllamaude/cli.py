@@ -27,7 +27,7 @@ from .tools import execute_tool
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "forget_file", "git"}
+TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "forget_file", "remember_output", "forget_output", "git"}
 
 
 @dataclass
@@ -51,6 +51,12 @@ plan_mode: bool = False
 
 # Remembered files - these won't be compressed
 remembered_files: set[str] = set()
+
+# Remembered tool output indices - these won't be compressed
+remembered_outputs: set[int] = set()
+
+# Counter for tool outputs
+tool_output_counter: int = 0
 
 
 PLAN_MODE_PROMPT = """
@@ -294,62 +300,132 @@ def forget_file(path: str) -> str:
     return f"{path} was not remembered"
 
 
-def compress_old_file_reads(messages: list, keep_recent: int = 1) -> None:
-    """Compress old read_file results in conversation history in-place.
+def summarize_tool_output(name: str, args: dict, result: str) -> str:
+    """Create a compressed summary of a tool output."""
+    lines = result.strip().split("\n")
+    line_count = len(lines)
 
-    Skips files that have been explicitly remembered.
+    if name == "git":
+        op = args.get("operation", "?")
+        extra = args.get("args", "")
+        if op == "status":
+            # Count modified/untracked from output
+            modified = sum(1 for l in lines if l.strip().startswith("modified:"))
+            untracked = sum(1 for l in lines if l.strip().startswith("??") or "Untracked files" in l)
+            return f"[git status: {modified} modified, {untracked} untracked, {line_count} lines]"
+        elif op in ("diff", "diff_staged"):
+            files_changed = sum(1 for l in lines if l.startswith("diff --git"))
+            return f"[git {op}: {files_changed} files, {line_count} lines of diff]"
+        elif op == "log":
+            return f"[git log: {line_count} commits shown]"
+        elif op == "blame":
+            return f"[git blame {extra}: {line_count} lines]"
+        elif op == "branch":
+            return f"[git branch: {line_count} branches]"
+        elif op == "show":
+            return f"[git show {extra}: {line_count} lines]"
+        return f"[git {op}: {line_count} lines]"
+
+    elif name == "bash":
+        cmd = args.get("command", "?")
+        # Truncate long commands
+        if len(cmd) > 50:
+            cmd = cmd[:47] + "..."
+        return f"[bash '{cmd}': {line_count} lines output]"
+
+    elif name == "grep":
+        pattern = args.get("pattern", "?")
+        match_count = line_count
+        return f"[grep '{pattern}': {match_count} matches]"
+
+    elif name == "glob":
+        pattern = args.get("pattern", "?")
+        return f"[glob '{pattern}': {line_count} files found]"
+
+    return f"[{name}: {line_count} lines]"
+
+
+def get_next_output_id() -> int:
+    """Get the next tool output ID."""
+    global tool_output_counter
+    tool_output_counter += 1
+    return tool_output_counter
+
+
+def remember_output(output_id: int | None = None) -> str:
+    """Remember a tool output by ID. If no ID, remembers the most recent."""
+    if output_id is None:
+        output_id = tool_output_counter
+    if output_id <= 0:
+        return "No outputs to remember"
+    remembered_outputs.add(output_id)
+    return f"Remembered output #{output_id}"
+
+
+def forget_output(output_id: int | None = None) -> str:
+    """Forget a tool output by ID. If no ID, forgets the most recent."""
+    if output_id is None:
+        output_id = tool_output_counter
+    if output_id in remembered_outputs:
+        remembered_outputs.discard(output_id)
+        return f"Forgot output #{output_id} - will be compressed"
+    return f"Output #{output_id} was not remembered"
+
+
+def compress_old_tool_outputs(messages: list, keep_recent: int = 1) -> None:
+    """Compress old tool outputs in conversation history in-place.
+
+    Skips remembered files and remembered outputs.
     """
-    # Find all tool result messages with read_file (and their paths)
-    read_file_entries = []  # [(index, path), ...]
+    # Tools that can be compressed
+    compressible_tools = {"read_file", "git", "bash", "grep", "glob"}
+
+    # Find all compressible tool results
+    tool_entries = []  # [(index, name, args, output_id), ...]
     for i, msg in enumerate(messages):
-        if msg.get("role") == "tool" and msg.get("name") == "read_file":
-            content = msg.get("content", "")
-            # Skip if already compressed or is an error
-            if content.startswith("[File:") or content.startswith("Error"):
+        if msg.get("role") == "tool":
+            name = msg.get("name", "")
+            if name not in compressible_tools:
                 continue
 
-            # Get the path from the preceding assistant message's tool call
-            path = "unknown"
+            content = msg.get("content", "")
+            # Skip if already compressed or is an error
+            if content.startswith("[") or content.startswith("Error") or content.startswith("No "):
+                continue
+
+            # Get args from the preceding assistant message's tool call
+            args = {}
             if i > 0:
                 prev = messages[i - 1]
                 tool_calls = prev.get("tool_calls", [])
                 for tc in tool_calls:
-                    if tc.get("function", {}).get("name") == "read_file":
-                        path = tc.get("function", {}).get("arguments", {}).get("path", "unknown")
+                    if tc.get("function", {}).get("name") == name:
+                        args = tc.get("function", {}).get("arguments", {})
                         break
 
-            # Skip remembered files
-            path_normalized = str(Path(path).expanduser().resolve()) if path != "unknown" else ""
-            if path_normalized in remembered_files:
+            # For read_file, check if path is remembered
+            if name == "read_file":
+                path = args.get("path", "")
+                path_normalized = str(Path(path).expanduser().resolve()) if path else ""
+                if path_normalized in remembered_files:
+                    continue
+
+            # Check if output ID is remembered
+            output_id = msg.get("output_id", 0)
+            if output_id in remembered_outputs:
                 continue
 
-            read_file_entries.append((i, path))
+            tool_entries.append((i, name, args, output_id))
 
     # Keep the most recent ones, compress the rest
-    to_compress = read_file_entries[:-keep_recent] if len(read_file_entries) > keep_recent else []
+    to_compress = tool_entries[:-keep_recent] if len(tool_entries) > keep_recent else []
 
-    for idx, path in to_compress:
-        messages[idx]["content"] = compress_file_content(path, messages[idx]["content"])
-
-
-def summarize_tool_result(name: str, result: str, max_lines: int = 50) -> str:
-    """Summarize tool result to reduce context noise."""
-    if result.startswith("Error") or result.startswith("No "):
-        return result
-
-    # Don't summarize read_file - model needs exact content for accurate edits
-    if name == "read_file":
-        return result
-
-    lines = result.split("\n")
-    if len(lines) <= max_lines:
-        return result
-
-    if name in ("bash", "glob", "grep", "git"):
-        # Truncate long discovery output
-        return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
-
-    return result
+    for idx, name, args, output_id in to_compress:
+        if name == "read_file":
+            path = args.get("path", "unknown")
+            messages[idx]["content"] = compress_file_content(path, messages[idx]["content"])
+        else:
+            messages[idx]["content"] = summarize_tool_output(name, args, messages[idx]["content"])
 
 
 def get_context_usage(messages: list, system_prompt: str, max_tokens: int = 32768) -> tuple[int, float]:
@@ -449,6 +525,12 @@ def format_tool_call(name: str, args: dict) -> str:
         return f"remember_file({args.get('path', '?')})"
     elif name == "forget_file":
         return f"forget_file({args.get('path', '?')})"
+    elif name == "remember_output":
+        oid = args.get("output_id", "last")
+        return f"remember_output(#{oid})"
+    elif name == "forget_output":
+        oid = args.get("output_id", "last")
+        return f"forget_output(#{oid})"
     elif name == "git":
         op = args.get("operation", "?")
         extra = args.get("args", "")
@@ -772,6 +854,16 @@ def run_agent_loop(
                     file_path = args.get("path", "")
                     result = forget_file(file_path)
                     console.print(f"[dim]{result}[/dim]")
+                # Handle remember_output specially
+                elif name == "remember_output":
+                    oid = args.get("output_id")
+                    result = remember_output(oid)
+                    console.print(f"[dim]{result}[/dim]")
+                # Handle forget_output specially
+                elif name == "forget_output":
+                    oid = args.get("output_id")
+                    result = forget_output(oid)
+                    console.print(f"[dim]{result}[/dim]")
                 # Confirm destructive operations
                 elif not confirm_tool(name, args, auto_approve):
                     result = "Tool execution cancelled by user."
@@ -801,14 +893,18 @@ def run_agent_loop(
                                 new_content = ""
                         record_change(file_path, old_content, new_content, name.replace("_file", ""))
                     # Show result preview for some operations
+                    # Get output ID for display
+                    display_id = tool_output_counter if name in {"read_file", "git", "bash", "grep", "glob"} else None
+                    id_suffix = f" [output #{display_id}]" if display_id else ""
+
                     if name == "read_file":
                         lines = result.split("\n")
-                        console.print(f"[dim]Read {len(lines)} lines[/dim]")
+                        console.print(f"[dim]Read {len(lines)} lines{id_suffix}[/dim]")
                     elif name == "bash":
-                        console.print(Panel(result, title="Output", border_style="dim"))
+                        console.print(Panel(result, title=f"Output{id_suffix}", border_style="dim"))
                     elif name == "git" and not result.startswith("Error"):
                         lines = result.split("\n")
-                        title = f"git output ({len(lines)} lines)"
+                        title = f"git output ({len(lines)} lines){id_suffix}"
                         console.print(Panel(result, title=title, border_style="dim"))
                     elif name in ("glob", "grep") and not result.startswith(("Error", "No ")):
                         lines = result.split("\n")
@@ -819,16 +915,19 @@ def run_agent_loop(
                     else:
                         console.print(f"[dim]{result}[/dim]")
 
-                # Summarize result to reduce context bloat
-                summarized = summarize_tool_result(name, result)
+                # Assign output ID for compressible outputs
+                compressible = {"read_file", "git", "bash", "grep", "glob"}
+                output_id = get_next_output_id() if name in compressible else None
+
                 conversation.add_tool_result(
                     tool_call_id=str(id(tool_call)),
                     name=name,
-                    result=summarized,
+                    result=result,
+                    output_id=output_id,
                 )
 
             # Compress old file reads to save context
-            compress_old_file_reads(conversation.messages)
+            compress_old_tool_outputs(conversation.messages)
         else:
             # No tool calls, just a text response
             if content:
@@ -923,8 +1022,11 @@ def main():
                 break
 
             if user_input.strip().lower() == "clear":
+                global tool_output_counter
                 conversation.clear()
                 remembered_files.clear()
+                remembered_outputs.clear()
+                tool_output_counter = 0
                 console.print("[dim]Conversation cleared.[/dim]")
                 continue
 

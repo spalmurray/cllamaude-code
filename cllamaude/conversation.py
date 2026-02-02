@@ -36,13 +36,16 @@ class Conversation:
         """Add an assistant message with tool calls."""
         self.messages.append({"role": "assistant", "tool_calls": tool_calls})
 
-    def add_tool_result(self, tool_call_id: str, name: str, result: str) -> None:
+    def add_tool_result(self, tool_call_id: str, name: str, result: str, output_id: int | None = None) -> None:
         """Add a tool result to the history."""
-        self.messages.append({
+        msg = {
             "role": "tool",
             "name": name,
             "content": result,
-        })
+        }
+        if output_id is not None:
+            msg["output_id"] = output_id
+        self.messages.append(msg)
 
     def clear(self) -> None:
         """Clear the conversation history."""
