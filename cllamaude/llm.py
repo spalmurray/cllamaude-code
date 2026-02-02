@@ -56,6 +56,12 @@ Use these tools to help the user with coding tasks.
 - Use glob to find files before reading them
 - Use grep to search for code patterns across the codebase
 
+## Context Management
+- File contents are automatically compressed after you read them to save context space.
+- If you read a file and plan to edit it or reference it later, call remember_file(path) IMMEDIATELY after reading.
+- If you don't remember a file, you'll need to re-read it before editing.
+- Only remember files you actually need - don't remember everything.
+
 ## Before You Start
 
 - If the user's request is vague or could apply to multiple files/locations, ASK for clarification first. Don't guess.

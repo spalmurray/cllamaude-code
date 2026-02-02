@@ -196,6 +196,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "forget_file",
+            "description": "Un-remember a file, allowing it to be compressed. Use when you're done with a file and want to free up context space.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path of the file to forget",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git",
             "description": "Run read-only git commands to understand repository state.",
             "parameters": {

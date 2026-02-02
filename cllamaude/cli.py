@@ -27,7 +27,7 @@ from .tools import execute_tool
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "git"}
+TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "forget_file", "git"}
 
 
 @dataclass
@@ -285,6 +285,15 @@ def remember_file(path: str) -> str:
     return f"Will keep {path} in context"
 
 
+def forget_file(path: str) -> str:
+    """Un-remember a file, allowing it to be compressed."""
+    path_normalized = str(Path(path).expanduser().resolve())
+    if path_normalized in remembered_files:
+        remembered_files.discard(path_normalized)
+        return f"Forgot {path} - will be compressed"
+    return f"{path} was not remembered"
+
+
 def compress_old_file_reads(messages: list, keep_recent: int = 1) -> None:
     """Compress old read_file results in conversation history in-place.
 
@@ -438,6 +447,8 @@ def format_tool_call(name: str, args: dict) -> str:
         return f"ask_user({preview})"
     elif name == "remember_file":
         return f"remember_file({args.get('path', '?')})"
+    elif name == "forget_file":
+        return f"forget_file({args.get('path', '?')})"
     elif name == "git":
         op = args.get("operation", "?")
         extra = args.get("args", "")
@@ -755,6 +766,11 @@ def run_agent_loop(
                 elif name == "remember_file":
                     file_path = args.get("path", "")
                     result = remember_file(file_path)
+                    console.print(f"[dim]{result}[/dim]")
+                # Handle forget_file specially (un-remembers a file)
+                elif name == "forget_file":
+                    file_path = args.get("path", "")
+                    result = forget_file(file_path)
                     console.print(f"[dim]{result}[/dim]")
                 # Confirm destructive operations
                 elif not confirm_tool(name, args, auto_approve):
