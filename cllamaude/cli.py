@@ -46,6 +46,28 @@ change_history: list[FileChange] = []
 current_turn: int = 0
 MAX_HISTORY = 50  # Keep last 50 changes
 
+# Planning mode state
+plan_mode: bool = False
+
+
+PLAN_MODE_PROMPT = """
+You are in PLANNING MODE. The user wants you to create a plan before taking action.
+
+You CAN use read-only tools to explore: read_file, glob, grep
+You must NOT use tools that make changes: write_file, edit_file, bash, undo_changes
+
+After exploring, output a plan that:
+1. Lists the files you'll modify
+2. Describes each change you'll make
+3. Notes any questions or uncertainties
+
+Format your plan as a numbered list. Wait for user approval before making changes.
+"""
+
+PLANNING_BLOCKED_TOOLS = {"write_file", "edit_file", "bash", "undo_changes"}
+
+EXECUTE_TRIGGERS = {"do it", "ok", "go", "execute", "proceed", "yes", "run it", "looks good", "lgtm"}
+
 
 def start_new_turn() -> None:
     """Called when user sends a new prompt."""
@@ -600,8 +622,12 @@ def run_agent_loop(
     auto_approve: bool = False,
     num_ctx: int = 32768,
     debug: bool = False,
+    planning: bool = False,
 ) -> None:
     """Run the agent loop until no more tool calls."""
+    # In planning mode, append planning instructions to system prompt
+    if planning:
+        system_prompt = system_prompt + "\n" + PLAN_MODE_PROMPT
     while True:
         tokens, pct = get_context_usage(conversation.messages, system_prompt, num_ctx)
 
@@ -678,8 +704,12 @@ def run_agent_loop(
 
                 console.print(f"[dim]Tool:[/dim] {format_tool_call(name, args)}")
 
+                # Block write tools in planning mode
+                if planning and name in PLANNING_BLOCKED_TOOLS:
+                    result = f"Blocked in planning mode: {name}. Only read-only tools allowed."
+                    console.print(f"[yellow]{result}[/yellow]")
                 # Handle undo_changes specially (not through execute_tool)
-                if name == "undo_changes":
+                elif name == "undo_changes":
                     num_turns = args.get("turns", 1) or 1
                     result = undo_turns(num_turns)
                     console.print(Panel(result, title="Undo", border_style="green"))
@@ -807,7 +837,7 @@ def main():
     console.print(Panel(
         f"[bold]Cllamaude[/bold] - Ollama-powered coding assistant\n"
         f"Model: {args.model}\n"
-        f"Commands: exit, clear, /undo, /history",
+        f"Commands: exit, clear, /undo, /history, /plan <task>",
         border_style="blue",
     ))
 
@@ -818,7 +848,8 @@ def main():
             context_info = f"{tokens} tokens ({pct:.0f}%)"
             console.print()
             console.print(f"[dim]{context_info:>{console.width - 1}}[/dim]")
-            user_input = console.input("[bold blue]>[/bold blue] ")
+            prompt_style = "[bold cyan]plan>[/bold cyan] " if plan_mode else "[bold blue]>[/bold blue] "
+            user_input = console.input(prompt_style)
 
             if not user_input.strip():
                 continue
@@ -839,6 +870,70 @@ def main():
 
             if user_input.strip().lower() in ("/history", "history"):
                 show_history()
+                continue
+
+            # Handle /plan command
+            global plan_mode
+            if user_input.strip().lower().startswith("/plan "):
+                task = user_input.strip()[6:]  # Remove "/plan "
+                plan_mode = True
+                console.print(Panel(
+                    f"[bold]Planning mode[/bold] - I'll create a plan for:\n{task}\n\n"
+                    f"[dim]Say 'do it' to execute, or give feedback to adjust.[/dim]",
+                    border_style="cyan",
+                ))
+                start_new_turn()
+                conversation.add_user_message(task)
+                run_agent_loop(
+                    conversation,
+                    args.model,
+                    system_prompt,
+                    num_ctx=args.context,
+                    debug=args.debug,
+                    planning=True,
+                )
+                if args.session:
+                    conversation.save(args.session)
+                continue
+
+            # Cancel plan mode
+            if plan_mode and user_input.strip().lower() in ("/cancel", "cancel", "nevermind", "abort"):
+                plan_mode = False
+                console.print("[dim]Plan cancelled.[/dim]")
+                continue
+
+            # Check if user is approving a plan
+            if plan_mode and user_input.strip().lower() in EXECUTE_TRIGGERS:
+                plan_mode = False
+                console.print("[cyan]Executing plan...[/cyan]")
+                start_new_turn()
+                conversation.add_user_message("Execute the plan now. Use the tools to make the changes.")
+                run_agent_loop(
+                    conversation,
+                    args.model,
+                    system_prompt,
+                    num_ctx=args.context,
+                    debug=args.debug,
+                )
+                if args.session:
+                    conversation.save(args.session)
+                continue
+
+            # Exit plan mode on other input (feedback or new task)
+            if plan_mode:
+                # User is giving feedback on the plan
+                start_new_turn()
+                conversation.add_user_message(user_input)
+                run_agent_loop(
+                    conversation,
+                    args.model,
+                    system_prompt,
+                    num_ctx=args.context,
+                    debug=args.debug,
+                    planning=True,  # Stay in planning mode for feedback
+                )
+                if args.session:
+                    conversation.save(args.session)
                 continue
 
             start_new_turn()
