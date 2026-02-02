@@ -8,6 +8,8 @@ import re
 import sys
 import time
 import threading
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
@@ -17,6 +19,7 @@ from rich.prompt import Confirm
 from rich.syntax import Syntax
 from rich.live import Live
 from rich.text import Text
+from rich.table import Table
 
 from .conversation import Conversation
 from .llm import chat, get_system_prompt
@@ -24,7 +27,108 @@ from .tools import execute_tool
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep"}
+TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes"}
+
+
+@dataclass
+class FileChange:
+    """Tracks a file change for undo functionality."""
+    path: str
+    old_content: str | None  # None if file didn't exist
+    new_content: str
+    operation: str  # "write" or "edit"
+    timestamp: datetime
+    turn: int  # Which conversation turn this belongs to
+
+
+# Global change history stack
+change_history: list[FileChange] = []
+current_turn: int = 0
+MAX_HISTORY = 50  # Keep last 50 changes
+
+
+def start_new_turn() -> None:
+    """Called when user sends a new prompt."""
+    global current_turn
+    current_turn += 1
+
+
+def record_change(path: str, old_content: str | None, new_content: str, operation: str) -> None:
+    """Record a file change for undo."""
+    change_history.append(FileChange(
+        path=path,
+        old_content=old_content,
+        new_content=new_content,
+        operation=operation,
+        timestamp=datetime.now(),
+        turn=current_turn,
+    ))
+    # Trim history if too long
+    if len(change_history) > MAX_HISTORY:
+        change_history.pop(0)
+
+
+def undo_turns(num_turns: int = 1) -> str:
+    """Undo file changes from the last N turns. Returns status message."""
+    if not change_history:
+        return "Nothing to undo - no changes recorded."
+
+    # Find unique turns in history (most recent first)
+    turns_in_history = sorted(set(c.turn for c in change_history), reverse=True)
+
+    if not turns_in_history:
+        return "Nothing to undo."
+
+    # Get the turns to undo
+    turns_to_undo = set(turns_in_history[:num_turns])
+
+    # Collect all changes from those turns
+    changes_to_undo = [c for c in change_history if c.turn in turns_to_undo]
+
+    if not changes_to_undo:
+        return "Nothing to undo."
+
+    results = []
+    for change in reversed(changes_to_undo):
+        p = Path(change.path).expanduser().resolve()
+        try:
+            if change.old_content is None:
+                # File was created, delete it
+                if p.exists():
+                    p.unlink()
+                    results.append(f"Deleted {change.path} (was newly created)")
+            else:
+                # Restore old content
+                p.write_text(change.old_content)
+                results.append(f"Restored {change.path}")
+        except Exception as e:
+            results.append(f"Error reverting {change.path}: {e}")
+
+    # Remove undone changes from history
+    for change in changes_to_undo:
+        change_history.remove(change)
+
+    turn_word = "turn" if num_turns == 1 else "turns"
+    return f"Undid {len(changes_to_undo)} change(s) from {num_turns} {turn_word}:\n" + "\n".join(results)
+
+
+def show_history() -> None:
+    """Display recent file changes."""
+    if not change_history:
+        console.print("[dim]No changes recorded yet.[/dim]")
+        return
+
+    table = Table(title="Recent Changes (newest first)")
+    table.add_column("Turn", style="dim")
+    table.add_column("Time", style="dim")
+    table.add_column("Op")
+    table.add_column("File")
+
+    for change in reversed(change_history[-15:]):  # Show last 15
+        time_str = change.timestamp.strftime("%H:%M:%S")
+        table.add_row(str(change.turn), time_str, change.operation, change.path)
+
+    console.print(table)
 
 
 def estimate_tokens(text: str) -> int:
@@ -221,7 +325,7 @@ def parse_tool_calls_from_text(content: str) -> list[dict] | None:
 
     # Find potential tool call starts: {"name": "tool_name"
     # Use a simple pattern that just finds the start, then brace-match to get full JSON
-    pattern = r'\{\s*"name"\s*:\s*"(read_file|write_file|bash|edit_file|glob|grep)"'
+    pattern = r'\{\s*"name"\s*:\s*"(read_file|write_file|bash|edit_file|glob|grep|undo_changes)"'
 
     tool_calls = []
     for match in re.finditer(pattern, content):
@@ -574,12 +678,39 @@ def run_agent_loop(
 
                 console.print(f"[dim]Tool:[/dim] {format_tool_call(name, args)}")
 
+                # Handle undo_changes specially (not through execute_tool)
+                if name == "undo_changes":
+                    num_turns = args.get("turns", 1) or 1
+                    result = undo_turns(num_turns)
+                    console.print(Panel(result, title="Undo", border_style="green"))
                 # Confirm destructive operations
-                if not confirm_tool(name, args, auto_approve):
+                elif not confirm_tool(name, args, auto_approve):
                     result = "Tool execution cancelled by user."
                     console.print("[yellow]Cancelled[/yellow]")
                 else:
+                    # Capture file content before write/edit for undo
+                    if name in ("write_file", "edit_file"):
+                        file_path = args.get("path", "")
+                        p = Path(file_path).expanduser().resolve()
+                        old_content = None
+                        if p.exists() and p.is_file():
+                            try:
+                                old_content = p.read_text()
+                            except Exception:
+                                pass
+
                     result = execute_tool(name, args)
+
+                    # Record successful file changes for undo
+                    if name in ("write_file", "edit_file") and not result.startswith("Error"):
+                        new_content = args.get("content", "") if name == "write_file" else ""
+                        if name == "edit_file":
+                            # For edit, read the new content
+                            try:
+                                new_content = Path(file_path).expanduser().resolve().read_text()
+                            except Exception:
+                                new_content = ""
+                        record_change(file_path, old_content, new_content, name.replace("_file", ""))
                     # Show result preview for some operations
                     if name == "read_file":
                         lines = result.split("\n")
@@ -658,6 +789,7 @@ def main():
 
     # Non-interactive mode: run single prompt and exit
     if args.prompt:
+        start_new_turn()
         conversation.add_user_message(args.prompt)
         run_agent_loop(
             conversation,
@@ -675,7 +807,7 @@ def main():
     console.print(Panel(
         f"[bold]Cllamaude[/bold] - Ollama-powered coding assistant\n"
         f"Model: {args.model}\n"
-        f"Type 'exit' or 'quit' to exit, 'clear' to reset conversation",
+        f"Commands: exit, clear, /undo, /history",
         border_style="blue",
     ))
 
@@ -700,6 +832,16 @@ def main():
                 console.print("[dim]Conversation cleared.[/dim]")
                 continue
 
+            if user_input.strip().lower() in ("/undo", "undo"):
+                result = undo_turns(1)
+                console.print(f"[green]{result}[/green]")
+                continue
+
+            if user_input.strip().lower() in ("/history", "history"):
+                show_history()
+                continue
+
+            start_new_turn()
             conversation.add_user_message(user_input)
             run_agent_loop(
                 conversation,

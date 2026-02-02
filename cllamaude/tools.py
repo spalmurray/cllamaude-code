@@ -142,6 +142,23 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "undo_changes",
+            "description": "Undo file changes from recent turns. Use this when the user asks to undo, revert, or rollback recent changes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "turns": {
+                        "type": "integer",
+                        "description": "Number of turns to undo (default: 1). Each turn is one user prompt and all the file changes made in response.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
