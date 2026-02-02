@@ -815,6 +815,7 @@ def run_agent_loop(
 
 
 def main():
+    global plan_mode
     parser = argparse.ArgumentParser(description="Cllamaude - Ollama-powered coding CLI")
     parser.add_argument(
         "-m", "--model",
@@ -911,7 +912,6 @@ def main():
                 continue
 
             # Handle /plan command
-            global plan_mode
             if user_input.strip().lower().startswith("/plan "):
                 task = user_input.strip()[6:]  # Remove "/plan "
                 plan_mode = True
