@@ -27,7 +27,7 @@ from .tools import execute_tool
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user"}
+TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file"}
 
 
 @dataclass
@@ -48,6 +48,9 @@ MAX_HISTORY = 50  # Keep last 50 changes
 
 # Planning mode state
 plan_mode: bool = False
+
+# Remembered files - these won't be compressed
+remembered_files: set[str] = set()
 
 
 PLAN_MODE_PROMPT = """
@@ -275,33 +278,49 @@ def compress_file_content(path: str, content: str) -> str:
     return "\n".join(summary_parts)
 
 
-def compress_old_file_reads(messages: list, keep_recent: int = 2) -> None:
-    """Compress old read_file results in conversation history in-place."""
-    # Find all tool result messages with read_file
-    read_file_indices = []
+def remember_file(path: str) -> str:
+    """Mark a file as important - it won't be compressed."""
+    path_normalized = str(Path(path).expanduser().resolve())
+    remembered_files.add(path_normalized)
+    return f"Will keep {path} in context"
+
+
+def compress_old_file_reads(messages: list, keep_recent: int = 1) -> None:
+    """Compress old read_file results in conversation history in-place.
+
+    Skips files that have been explicitly remembered.
+    """
+    # Find all tool result messages with read_file (and their paths)
+    read_file_entries = []  # [(index, path), ...]
     for i, msg in enumerate(messages):
         if msg.get("role") == "tool" and msg.get("name") == "read_file":
             content = msg.get("content", "")
             # Skip if already compressed or is an error
-            if not content.startswith("[File:") and not content.startswith("Error"):
-                read_file_indices.append(i)
+            if content.startswith("[File:") or content.startswith("Error"):
+                continue
+
+            # Get the path from the preceding assistant message's tool call
+            path = "unknown"
+            if i > 0:
+                prev = messages[i - 1]
+                tool_calls = prev.get("tool_calls", [])
+                for tc in tool_calls:
+                    if tc.get("function", {}).get("name") == "read_file":
+                        path = tc.get("function", {}).get("arguments", {}).get("path", "unknown")
+                        break
+
+            # Skip remembered files
+            path_normalized = str(Path(path).expanduser().resolve()) if path != "unknown" else ""
+            if path_normalized in remembered_files:
+                continue
+
+            read_file_entries.append((i, path))
 
     # Keep the most recent ones, compress the rest
-    to_compress = read_file_indices[:-keep_recent] if len(read_file_indices) > keep_recent else []
+    to_compress = read_file_entries[:-keep_recent] if len(read_file_entries) > keep_recent else []
 
-    for idx in to_compress:
-        msg = messages[idx]
-        # Try to get the path from the preceding assistant message's tool call
-        path = "unknown"
-        if idx > 0:
-            prev = messages[idx - 1]
-            tool_calls = prev.get("tool_calls", [])
-            for tc in tool_calls:
-                if tc.get("function", {}).get("name") == "read_file":
-                    path = tc.get("function", {}).get("arguments", {}).get("path", "unknown")
-                    break
-
-        msg["content"] = compress_file_content(path, msg["content"])
+    for idx, path in to_compress:
+        messages[idx]["content"] = compress_file_content(path, messages[idx]["content"])
 
 
 def summarize_tool_result(name: str, result: str, max_lines: int = 50) -> str:
@@ -417,6 +436,8 @@ def format_tool_call(name: str, args: dict) -> str:
         question = args.get("question", "?")
         preview = question[:50] + "..." if len(question) > 50 else question
         return f"ask_user({preview})"
+    elif name == "remember_file":
+        return f"remember_file({args.get('path', '?')})"
     return f"{name}({args})"
 
 
@@ -724,6 +745,11 @@ def run_agent_loop(
                     result = console.input("[bold cyan]Your answer:[/bold cyan] ")
                     if not result.strip():
                         result = "(no answer provided)"
+                # Handle remember_file specially (marks file to keep in context)
+                elif name == "remember_file":
+                    file_path = args.get("path", "")
+                    result = remember_file(file_path)
+                    console.print(f"[dim]{result}[/dim]")
                 # Confirm destructive operations
                 elif not confirm_tool(name, args, auto_approve):
                     result = "Tool execution cancelled by user."
@@ -871,6 +897,7 @@ def main():
 
             if user_input.strip().lower() == "clear":
                 conversation.clear()
+                remembered_files.clear()
                 console.print("[dim]Conversation cleared.[/dim]")
                 continue
 

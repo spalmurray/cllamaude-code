@@ -176,6 +176,23 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_file",
+            "description": "Mark a file as important to keep in context. By default, old file reads get compressed to save space. Use this on files you'll need to reference later (e.g., files you plan to edit).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path of the file to remember",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]
 
 
