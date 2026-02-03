@@ -1049,6 +1049,23 @@ def run_agent_loop(
             error_str = str(error)
             if "failed to parse XML" in error_str or "syntax error" in error_str.lower():
                 console.print("[red]Model generated malformed output (XML parse error). Try a simpler prompt or say 'continue'.[/red]")
+                console.print(f"[dim]Error type: {type(error).__name__}[/dim]")
+                console.print(f"[dim]Error details: {error_str}[/dim]")
+                # Log the last user message for context
+                last_user_msg = None
+                for msg in reversed(conversation.messages):
+                    if msg.get("role") == "user":
+                        last_user_msg = msg.get("content", "")[:200]
+                        break
+                if last_user_msg:
+                    console.print(f"[dim]Last user message (truncated): {last_user_msg}...[/dim]")
+                # Check if error has any additional attributes
+                if hasattr(error, '__dict__'):
+                    for attr, val in error.__dict__.items():
+                        if attr.startswith('_'):
+                            continue
+                        val_str = str(val)[:500] if val else "None"
+                        console.print(f"[dim]  {attr}: {val_str}[/dim]")
                 break
             raise error
 
@@ -1281,7 +1298,7 @@ def main():
 
 
         except KeyboardInterrupt:
-            console.print("\n[dim]Use 'exit' to quit[/dim]")
+            console.print("\n[dim]Use '/exit' to quit[/dim]")
             continue
         except EOFError:
             console.print("\n[dim]Goodbye![/dim]")
