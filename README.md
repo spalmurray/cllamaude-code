@@ -33,8 +33,8 @@ cllamaude
 
 ## Commands
 
-- `exit` / `quit` - Exit the CLI
-- `clear` - Clear conversation history
+- `/exit` / `/quit` - Exit the CLI
+- `/clear` - Clear conversation history
 - `/undo` - Undo the last turn's file changes
 - `/history` - Show recent file changes
 - `/plan <task>` - Enter planning mode (read-only exploration, then approve to execute)

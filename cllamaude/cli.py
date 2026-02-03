@@ -1164,7 +1164,7 @@ def main():
     console.print(Panel(
         f"[bold]Cllamaude[/bold] - Ollama-powered coding assistant\n"
         f"Model: {args.model}\n"
-        f"Commands: exit, clear, /undo, /history, /plan, /edit",
+        f"Commands: /exit, /clear, /undo, /history, /plan, /edit",
         border_style="blue",
     ))
 
@@ -1181,7 +1181,7 @@ def main():
             if not user_input.strip():
                 continue
 
-            if user_input.strip().lower() in ("exit", "quit"):
+            if user_input.strip().lower() in ("/exit", "/quit"):
                 console.print("[dim]Goodbye![/dim]")
                 break
 
@@ -1193,18 +1193,18 @@ def main():
                     continue
                 console.print(f"[dim]Received {len(user_input.strip().splitlines())} lines.[/dim]")
 
-            if user_input.strip().lower() == "clear":
+            if user_input.strip().lower() == "/clear":
                 conversation.clear()
                 session.clear()
                 console.print("[dim]Conversation cleared.[/dim]")
                 continue
 
-            if user_input.strip().lower() in ("/undo", "undo"):
+            if user_input.strip().lower() == "/undo":
                 result = session.undo_turns(1)
                 console.print(f"[green]{result}[/green]")
                 continue
 
-            if user_input.strip().lower() in ("/history", "history"):
+            if user_input.strip().lower() == "/history":
                 session.show_history()
                 continue
 
