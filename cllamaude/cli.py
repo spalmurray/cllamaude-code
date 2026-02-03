@@ -6,7 +6,9 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
+import tempfile
 import time
 import threading
 from dataclasses import dataclass, field
@@ -28,6 +30,7 @@ from .config import (
     MAX_FUNCTIONS_IN_SUMMARY, RESULT_PREVIEW_LINES, SPINNER_REFRESH_RATE,
     COMPRESSIBLE_TOOLS, PLANNING_BLOCKED_TOOLS, EXECUTE_TRIGGERS, SAFE_TOOLS,
     MAX_IMPORTS_DISPLAY, MAX_CLASSES_DISPLAY, MAX_FUNCTIONS_DISPLAY,
+    DEFAULT_EDITOR,
 )
 from .conversation import Conversation
 from .llm import chat, get_system_prompt
@@ -661,6 +664,26 @@ def is_path_in_cwd(path: str) -> bool:
         return False
 
 
+def get_input_from_editor() -> str | None:
+    """Open an editor for multi-line input. Returns content or None if cancelled/error."""
+    editor = os.environ.get("EDITOR", DEFAULT_EDITOR)
+    try:
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".md", delete=False) as f:
+            temp_path = f.name
+        subprocess.run([editor, temp_path], check=True)
+        with open(temp_path, "r") as f:
+            content = f.read()
+        os.unlink(temp_path)
+        return content if content.strip() else None
+    except Exception as e:
+        console.print(f"[red]Editor error: {e}[/red]")
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+        return None
+
+
 def is_safe_bash_command(command: str) -> bool:
     """Check if a bash command is safe to auto-approve."""
     try:
@@ -1153,7 +1176,7 @@ def main():
     console.print(Panel(
         f"[bold]Cllamaude[/bold] - Ollama-powered coding assistant\n"
         f"Model: {args.model}\n"
-        f"Commands: exit, clear, /undo, /history, /plan <task>",
+        f"Commands: exit, clear, /undo, /history, /plan, /edit",
         border_style="blue",
     ))
 
@@ -1173,6 +1196,14 @@ def main():
             if user_input.strip().lower() in ("exit", "quit"):
                 console.print("[dim]Goodbye![/dim]")
                 break
+
+            # Open editor for multi-line input
+            if user_input.strip().lower() == "/edit":
+                user_input = get_input_from_editor()
+                if user_input is None:
+                    console.print("[dim]Empty input, cancelled.[/dim]")
+                    continue
+                console.print(f"[dim]Received {len(user_input.strip().splitlines())} lines.[/dim]")
 
             if user_input.strip().lower() == "clear":
                 conversation.clear()

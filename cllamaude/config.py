@@ -33,6 +33,7 @@ MAX_FUNCTIONS_IN_SUMMARY = 10  # Max functions to list in compressed summary
 
 # --- UI ---
 SPINNER_REFRESH_RATE = 10  # Refresh rate for spinner (per second)
+DEFAULT_EDITOR = "vim"  # Fallback editor if $EDITOR not set
 
 # --- Tool Names ---
 # These are the tools that can have their output compressed
