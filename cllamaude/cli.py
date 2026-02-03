@@ -8,7 +8,7 @@ import re
 import sys
 import time
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -41,25 +41,217 @@ class FileChange:
     turn: int  # Which conversation turn this belongs to
 
 
-# Global change history stack
-change_history: list[FileChange] = []
-current_turn: int = 0
 MAX_HISTORY = 50  # Keep last 50 changes
 
-# Planning mode state
-plan_mode: bool = False
 
-# Remembered files - these won't be compressed
-remembered_files: set[str] = set()
+@dataclass
+class Session:
+    """Encapsulates all session state."""
+    change_history: list[FileChange] = field(default_factory=list)
+    current_turn: int = 0
+    plan_mode: bool = False
+    remembered_files: set[str] = field(default_factory=set)
+    remembered_outputs: set[int] = field(default_factory=set)
+    tool_output_counter: int = 0
+    notes: list[str] = field(default_factory=list)
 
-# Remembered tool output indices - these won't be compressed
-remembered_outputs: set[int] = set()
+    def start_new_turn(self, messages: list | None = None) -> None:
+        """Called when user sends a new prompt. Compresses outputs from previous turn."""
+        self.current_turn += 1
+        if messages is not None:
+            compress_old_tool_outputs(messages, self)
 
-# Counter for tool outputs
-tool_output_counter: int = 0
+    def record_change(self, path: str, old_content: str | None, new_content: str, operation: str) -> None:
+        """Record a file change for undo."""
+        self.change_history.append(FileChange(
+            path=path,
+            old_content=old_content,
+            new_content=new_content,
+            operation=operation,
+            timestamp=datetime.now(),
+            turn=self.current_turn,
+        ))
+        if len(self.change_history) > MAX_HISTORY:
+            self.change_history.pop(0)
 
-# Notes - free-form memory that persists
-notes: list[str] = []
+    def undo_turns(self, num_turns: int = 1) -> str:
+        """Undo file changes from the last N turns. Returns status message."""
+        if not self.change_history:
+            return "Nothing to undo - no changes recorded."
+
+        turns_in_history = sorted(set(c.turn for c in self.change_history), reverse=True)
+        if not turns_in_history:
+            return "Nothing to undo."
+
+        turns_to_undo = set(turns_in_history[:num_turns])
+        changes_to_undo = [c for c in self.change_history if c.turn in turns_to_undo]
+
+        if not changes_to_undo:
+            return "Nothing to undo."
+
+        results = []
+        for change in reversed(changes_to_undo):
+            p = Path(change.path).expanduser().resolve()
+            try:
+                if change.old_content is None:
+                    if p.exists():
+                        p.unlink()
+                        results.append(f"Deleted {change.path} (was newly created)")
+                else:
+                    p.write_text(change.old_content)
+                    results.append(f"Restored {change.path}")
+            except Exception as e:
+                results.append(f"Error reverting {change.path}: {e}")
+
+        for change in changes_to_undo:
+            self.change_history.remove(change)
+
+        turn_word = "turn" if num_turns == 1 else "turns"
+        return f"Undid {len(changes_to_undo)} change(s) from {num_turns} {turn_word}:\n" + "\n".join(results)
+
+    def show_history(self) -> None:
+        """Display recent file changes."""
+        if not self.change_history:
+            console.print("[dim]No changes recorded yet.[/dim]")
+            return
+
+        table = Table(title="Recent Changes (newest first)")
+        table.add_column("Turn", style="dim")
+        table.add_column("Time", style="dim")
+        table.add_column("Op")
+        table.add_column("File")
+
+        for change in reversed(self.change_history[-15:]):
+            time_str = change.timestamp.strftime("%H:%M:%S")
+            table.add_row(str(change.turn), time_str, change.operation, change.path)
+
+        console.print(table)
+
+    def remember_file(self, path: str) -> str:
+        """Mark a file as important - it won't be compressed."""
+        path_normalized = str(Path(path).expanduser().resolve())
+        self.remembered_files.add(path_normalized)
+        return f"Will keep {path} in context"
+
+    def forget_file(self, path: str, messages: list | None = None) -> str:
+        """Un-remember a file and immediately compress it in context."""
+        path_normalized = str(Path(path).expanduser().resolve())
+        self.remembered_files.discard(path_normalized)
+
+        if messages is None:
+            return f"Forgot {path}"
+
+        compressed_count = 0
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "tool" and msg.get("name") == "read_file":
+                content = msg.get("content", "")
+                if content.startswith("[File:") or content.startswith("Error"):
+                    continue
+
+                if i > 0:
+                    prev = messages[i - 1]
+                    tool_calls = prev.get("tool_calls", [])
+                    for tc in tool_calls:
+                        if tc.get("function", {}).get("name") == "read_file":
+                            tc_path = tc.get("function", {}).get("arguments", {}).get("path", "")
+                            tc_normalized = str(Path(tc_path).expanduser().resolve()) if tc_path else ""
+                            if tc_normalized == path_normalized:
+                                msg["content"] = compress_file_content(path, content)
+                                compressed_count += 1
+                                break
+
+        if compressed_count > 0:
+            return f"Forgot {path} ({compressed_count} read(s) compressed)"
+        return f"Forgot {path}"
+
+    def get_next_output_id(self) -> int:
+        """Get the next tool output ID."""
+        self.tool_output_counter += 1
+        return self.tool_output_counter
+
+    def remember_output(self, output_id: int | None = None) -> str:
+        """Remember a tool output by ID. If no ID, remembers the most recent."""
+        if output_id is None:
+            output_id = self.tool_output_counter
+        if output_id <= 0:
+            return "No outputs to remember"
+        self.remembered_outputs.add(output_id)
+        return f"Remembered output #{output_id}"
+
+    def forget_output(self, output_id: int | None = None, messages: list | None = None) -> str:
+        """Forget a tool output by ID and immediately compress it."""
+        if output_id is None:
+            output_id = self.tool_output_counter
+
+        self.remembered_outputs.discard(output_id)
+
+        if messages is None:
+            return f"Forgot output #{output_id}"
+
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("output_id") == output_id:
+                content = msg.get("content", "")
+                name = msg.get("name", "")
+
+                if content.startswith("[") or content.startswith("Error") or content.startswith("No "):
+                    continue
+
+                idx = messages.index(msg)
+                args = {}
+                if idx > 0:
+                    prev = messages[idx - 1]
+                    tool_calls = prev.get("tool_calls", [])
+                    for tc in tool_calls:
+                        if tc.get("function", {}).get("name") == name:
+                            args = tc.get("function", {}).get("arguments", {})
+                            break
+
+                if name == "read_file":
+                    path = args.get("path", "unknown")
+                    msg["content"] = compress_file_content(path, content)
+                else:
+                    msg["content"] = summarize_tool_output(name, args, content)
+
+                return f"Forgot and compressed output #{output_id}"
+
+        return f"Forgot output #{output_id}"
+
+    def add_note(self, content: str) -> str:
+        """Add a note to persistent memory."""
+        note_id = len(self.notes)
+        self.notes.append(content)
+        return f"Added note #{note_id}"
+
+    def clear_note(self, note_id: int | None = None) -> str:
+        """Clear a note by ID, or all notes if no ID given."""
+        if note_id is None:
+            count = len(self.notes)
+            self.notes.clear()
+            return f"Cleared all {count} notes"
+        if 0 <= note_id < len(self.notes):
+            self.notes[note_id] = ""
+            return f"Cleared note #{note_id}"
+        return f"Note #{note_id} not found"
+
+    def get_notes_context(self) -> str:
+        """Get notes formatted for inclusion in context."""
+        active_notes = [(i, n) for i, n in enumerate(self.notes) if n]
+        if not active_notes:
+            return ""
+        lines = ["## Your Notes"]
+        for i, content in active_notes:
+            lines.append(f"[{i}] {content}")
+        return "\n".join(lines)
+
+    def clear(self) -> None:
+        """Clear all session state."""
+        self.change_history.clear()
+        self.current_turn = 0
+        self.plan_mode = False
+        self.remembered_files.clear()
+        self.remembered_outputs.clear()
+        self.tool_output_counter = 0
+        self.notes.clear()
 
 
 
@@ -80,92 +272,6 @@ Format your plan as a numbered list. Wait for user approval before making change
 PLANNING_BLOCKED_TOOLS = {"write_file", "edit_file", "bash", "undo_changes"}
 
 EXECUTE_TRIGGERS = {"do it", "doit", "ok", "go", "execute", "proceed", "yes", "run it", "looks good", "lgtm"}
-
-
-def start_new_turn(messages: list | None = None) -> None:
-    """Called when user sends a new prompt. Compresses outputs from previous turn."""
-    global current_turn
-    current_turn += 1
-    if messages is not None:
-        compress_old_tool_outputs(messages)
-
-
-def record_change(path: str, old_content: str | None, new_content: str, operation: str) -> None:
-    """Record a file change for undo."""
-    change_history.append(FileChange(
-        path=path,
-        old_content=old_content,
-        new_content=new_content,
-        operation=operation,
-        timestamp=datetime.now(),
-        turn=current_turn,
-    ))
-    # Trim history if too long
-    if len(change_history) > MAX_HISTORY:
-        change_history.pop(0)
-
-
-def undo_turns(num_turns: int = 1) -> str:
-    """Undo file changes from the last N turns. Returns status message."""
-    if not change_history:
-        return "Nothing to undo - no changes recorded."
-
-    # Find unique turns in history (most recent first)
-    turns_in_history = sorted(set(c.turn for c in change_history), reverse=True)
-
-    if not turns_in_history:
-        return "Nothing to undo."
-
-    # Get the turns to undo
-    turns_to_undo = set(turns_in_history[:num_turns])
-
-    # Collect all changes from those turns
-    changes_to_undo = [c for c in change_history if c.turn in turns_to_undo]
-
-    if not changes_to_undo:
-        return "Nothing to undo."
-
-    results = []
-    for change in reversed(changes_to_undo):
-        p = Path(change.path).expanduser().resolve()
-        try:
-            if change.old_content is None:
-                # File was created, delete it
-                if p.exists():
-                    p.unlink()
-                    results.append(f"Deleted {change.path} (was newly created)")
-            else:
-                # Restore old content
-                p.write_text(change.old_content)
-                results.append(f"Restored {change.path}")
-        except Exception as e:
-            results.append(f"Error reverting {change.path}: {e}")
-
-    # Remove undone changes from history
-    for change in changes_to_undo:
-        change_history.remove(change)
-
-    turn_word = "turn" if num_turns == 1 else "turns"
-    return f"Undid {len(changes_to_undo)} change(s) from {num_turns} {turn_word}:\n" + "\n".join(results)
-
-
-def show_history() -> None:
-    """Display recent file changes."""
-    if not change_history:
-        console.print("[dim]No changes recorded yet.[/dim]")
-        return
-
-    table = Table(title="Recent Changes (newest first)")
-    table.add_column("Turn", style="dim")
-    table.add_column("Time", style="dim")
-    table.add_column("Op")
-    table.add_column("File")
-
-    for change in reversed(change_history[-15:]):  # Show last 15
-        time_str = change.timestamp.strftime("%H:%M:%S")
-        table.add_row(str(change.turn), time_str, change.operation, change.path)
-
-    console.print(table)
 
 
 def estimate_tokens(text: str) -> int:
@@ -290,47 +396,6 @@ def compress_file_content(path: str, content: str) -> str:
     return "\n".join(summary_parts)
 
 
-def remember_file(path: str) -> str:
-    """Mark a file as important - it won't be compressed."""
-    path_normalized = str(Path(path).expanduser().resolve())
-    remembered_files.add(path_normalized)
-    return f"Will keep {path} in context"
-
-
-def forget_file(path: str, messages: list | None = None) -> str:
-    """Un-remember a file and immediately compress it in context."""
-    path_normalized = str(Path(path).expanduser().resolve())
-    remembered_files.discard(path_normalized)
-
-    if messages is None:
-        return f"Forgot {path}"
-
-    # Immediately compress this file in conversation
-    compressed_count = 0
-    for i, msg in enumerate(messages):
-        if msg.get("role") == "tool" and msg.get("name") == "read_file":
-            content = msg.get("content", "")
-            if content.startswith("[File:") or content.startswith("Error"):
-                continue
-
-            # Check if this is our file
-            if i > 0:
-                prev = messages[i - 1]
-                tool_calls = prev.get("tool_calls", [])
-                for tc in tool_calls:
-                    if tc.get("function", {}).get("name") == "read_file":
-                        tc_path = tc.get("function", {}).get("arguments", {}).get("path", "")
-                        tc_normalized = str(Path(tc_path).expanduser().resolve()) if tc_path else ""
-                        if tc_normalized == path_normalized:
-                            msg["content"] = compress_file_content(path, content)
-                            compressed_count += 1
-                            break
-
-    if compressed_count > 0:
-        return f"Forgot {path} ({compressed_count} read(s) compressed)"
-    return f"Forgot {path}"
-
-
 def summarize_tool_output(name: str, args: dict, result: str) -> str:
     """Create a compressed summary of a tool output."""
     lines = result.strip().split("\n")
@@ -376,96 +441,7 @@ def summarize_tool_output(name: str, args: dict, result: str) -> str:
     return f"[{name}: {line_count} lines]"
 
 
-def get_next_output_id() -> int:
-    """Get the next tool output ID."""
-    global tool_output_counter
-    tool_output_counter += 1
-    return tool_output_counter
-
-
-def remember_output(output_id: int | None = None) -> str:
-    """Remember a tool output by ID. If no ID, remembers the most recent."""
-    if output_id is None:
-        output_id = tool_output_counter
-    if output_id <= 0:
-        return "No outputs to remember"
-    remembered_outputs.add(output_id)
-    return f"Remembered output #{output_id}"
-
-
-def add_note(content: str) -> str:
-    """Add a note to persistent memory."""
-    note_id = len(notes)
-    notes.append(content)
-    return f"Added note #{note_id}"
-
-
-def clear_note(note_id: int | None = None) -> str:
-    """Clear a note by ID, or all notes if no ID given."""
-    if note_id is None:
-        count = len(notes)
-        notes.clear()
-        return f"Cleared all {count} notes"
-    if 0 <= note_id < len(notes):
-        notes[note_id] = ""  # Mark as cleared but keep indices stable
-        return f"Cleared note #{note_id}"
-    return f"Note #{note_id} not found"
-
-
-def get_notes_context() -> str:
-    """Get notes formatted for inclusion in context."""
-    active_notes = [(i, n) for i, n in enumerate(notes) if n]
-    if not active_notes:
-        return ""
-    lines = ["## Your Notes"]
-    for i, content in active_notes:
-        lines.append(f"[{i}] {content}")
-    return "\n".join(lines)
-
-
-def forget_output(output_id: int | None = None, messages: list | None = None) -> str:
-    """Forget a tool output by ID and immediately compress it."""
-    if output_id is None:
-        output_id = tool_output_counter
-
-    remembered_outputs.discard(output_id)
-
-    if messages is None:
-        return f"Forgot output #{output_id}"
-
-    # Immediately compress this output in conversation
-    for msg in messages:
-        if msg.get("role") == "tool" and msg.get("output_id") == output_id:
-            content = msg.get("content", "")
-            name = msg.get("name", "")
-
-            # Skip if already compressed or error
-            if content.startswith("[") or content.startswith("Error") or content.startswith("No "):
-                continue
-
-            # Find args from preceding message
-            idx = messages.index(msg)
-            args = {}
-            if idx > 0:
-                prev = messages[idx - 1]
-                tool_calls = prev.get("tool_calls", [])
-                for tc in tool_calls:
-                    if tc.get("function", {}).get("name") == name:
-                        args = tc.get("function", {}).get("arguments", {})
-                        break
-
-            if name == "read_file":
-                path = args.get("path", "unknown")
-                msg["content"] = compress_file_content(path, content)
-            else:
-                msg["content"] = summarize_tool_output(name, args, content)
-
-            return f"Forgot and compressed output #{output_id}"
-
-    return f"Forgot output #{output_id}"
-
-
-def compress_old_tool_outputs(messages: list, keep_recent: int = 1) -> None:
+def compress_old_tool_outputs(messages: list, session: Session, keep_recent: int = 1) -> None:
     """Compress old tool outputs in conversation history in-place.
 
     Skips remembered files and remembered outputs.
@@ -500,12 +476,12 @@ def compress_old_tool_outputs(messages: list, keep_recent: int = 1) -> None:
             if name == "read_file":
                 path = args.get("path", "")
                 path_normalized = str(Path(path).expanduser().resolve()) if path else ""
-                if path_normalized in remembered_files:
+                if path_normalized in session.remembered_files:
                     continue
 
             # Check if output ID is remembered
             output_id = msg.get("output_id", 0)
-            if output_id in remembered_outputs:
+            if output_id in session.remembered_outputs:
                 continue
 
             tool_entries.append((i, name, args, output_id))
@@ -855,6 +831,7 @@ def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
 
 def run_agent_loop(
     conversation: Conversation,
+    session: Session,
     model: str,
     system_prompt: str,
     auto_approve: bool = False,
@@ -873,7 +850,7 @@ def run_agent_loop(
     while True:
         # Build full system prompt with notes
         full_system_prompt = base_system_prompt
-        notes_ctx = get_notes_context()
+        notes_ctx = session.get_notes_context()
         if notes_ctx:
             full_system_prompt = full_system_prompt + "\n\n" + notes_ctx
 
@@ -967,7 +944,7 @@ def run_agent_loop(
                 # Handle undo_changes specially (not through execute_tool)
                 elif name == "undo_changes":
                     num_turns = args.get("turns", 1) or 1
-                    result = undo_turns(num_turns)
+                    result = session.undo_turns(num_turns)
                     console.print(Panel(result, title="Undo", border_style="green"))
                 # Handle ask_user specially (requires user interaction)
                 elif name == "ask_user":
@@ -979,34 +956,34 @@ def run_agent_loop(
                 # Handle remember_file specially (marks file to keep in context)
                 elif name == "remember_file":
                     file_path = args.get("path", "")
-                    result = remember_file(file_path)
+                    result = session.remember_file(file_path)
                     console.print(f"[dim]{result}[/dim]")
                 # Handle forget_file specially (un-remembers and compresses immediately)
                 elif name == "forget_file":
                     file_path = args.get("path", "")
-                    result = forget_file(file_path, conversation.messages)
+                    result = session.forget_file(file_path, conversation.messages)
                     console.print(f"[dim]{result}[/dim]")
                 # Handle remember_output specially
                 elif name == "remember_output":
                     oid = args.get("output_id")
-                    result = remember_output(oid)
+                    result = session.remember_output(oid)
                     console.print(f"[dim]{result}[/dim]")
                 # Handle forget_output specially (compresses immediately)
                 elif name == "forget_output":
                     oid = args.get("output_id")
                     if oid is None:
-                        oid = tool_output_counter
-                    result = forget_output(oid, conversation.messages)
+                        oid = session.tool_output_counter
+                    result = session.forget_output(oid, conversation.messages)
                     console.print(f"[dim]{result}[/dim]")
                 # Handle note specially
                 elif name == "note":
                     content = args.get("content", "")
-                    result = add_note(content)
+                    result = session.add_note(content)
                     console.print(f"[dim]{result}[/dim]")
                 # Handle clear_note specially
                 elif name == "clear_note":
                     nid = args.get("note_id")
-                    result = clear_note(nid)
+                    result = session.clear_note(nid)
                     console.print(f"[dim]{result}[/dim]")
                 # Confirm destructive operations
                 elif not confirm_tool(name, args, auto_approve):
@@ -1035,10 +1012,10 @@ def run_agent_loop(
                                 new_content = Path(file_path).expanduser().resolve().read_text()
                             except Exception:
                                 new_content = ""
-                        record_change(file_path, old_content, new_content, name.replace("_file", ""))
+                        session.record_change(file_path, old_content, new_content, name.replace("_file", ""))
                     # Show result preview for some operations
                     # Get output ID for display
-                    display_id = tool_output_counter if name in {"read_file", "read_around", "git", "bash", "grep", "glob"} else None
+                    display_id = session.tool_output_counter if name in {"read_file", "read_around", "git", "bash", "grep", "glob"} else None
                     id_suffix = f" [output #{display_id}]" if display_id else ""
 
                     if name in ("read_file", "read_around"):
@@ -1065,7 +1042,7 @@ def run_agent_loop(
                         console.print(f"[dim]{result}[/dim]")
 
                 # Assign output ID for compressible outputs and track pending
-                output_id = get_next_output_id() if name in compressible else None
+                output_id = session.get_next_output_id() if name in compressible else None
 
                 result_for_context = result
 
@@ -1088,7 +1065,6 @@ def run_agent_loop(
 
 
 def main():
-    global plan_mode
     parser = argparse.ArgumentParser(description="Cllamaude - Ollama-powered coding CLI")
     parser.add_argument(
         "-m", "--model",
@@ -1125,15 +1101,19 @@ def main():
     else:
         conversation = Conversation()
 
+    # Create session state
+    session = Session()
+
     cwd = os.getcwd()
     system_prompt = get_system_prompt(cwd)
 
     # Non-interactive mode: run single prompt and exit
     if args.prompt:
-        start_new_turn(conversation.messages)
+        session.start_new_turn(conversation.messages)
         conversation.add_user_message(args.prompt)
         run_agent_loop(
             conversation,
+            session,
             args.model,
             system_prompt,
             auto_approve=True,
@@ -1159,7 +1139,7 @@ def main():
             context_info = f"{tokens} tokens ({pct:.0f}%)"
             console.print()
             console.print(f"[dim]{context_info:>{console.width - 1}}[/dim]")
-            prompt_style = "[bold cyan]plan>[/bold cyan] " if plan_mode else "[bold blue]>[/bold blue] "
+            prompt_style = "[bold cyan]plan>[/bold cyan] " if session.plan_mode else "[bold blue]>[/bold blue] "
             user_input = console.input(prompt_style)
 
             if not user_input.strip():
@@ -1170,37 +1150,34 @@ def main():
                 break
 
             if user_input.strip().lower() == "clear":
-                global tool_output_counter
                 conversation.clear()
-                remembered_files.clear()
-                remembered_outputs.clear()
-                notes.clear()
-                tool_output_counter = 0
+                session.clear()
                 console.print("[dim]Conversation cleared.[/dim]")
                 continue
 
             if user_input.strip().lower() in ("/undo", "undo"):
-                result = undo_turns(1)
+                result = session.undo_turns(1)
                 console.print(f"[green]{result}[/green]")
                 continue
 
             if user_input.strip().lower() in ("/history", "history"):
-                show_history()
+                session.show_history()
                 continue
 
             # Handle /plan command
             if user_input.strip().lower().startswith("/plan "):
                 task = user_input.strip()[6:]  # Remove "/plan "
-                plan_mode = True
+                session.plan_mode = True
                 console.print(Panel(
                     f"[bold]Planning mode[/bold] - I'll create a plan for:\n{task}\n\n"
                     f"[dim]Say 'do it' to execute, or give feedback to adjust.[/dim]",
                     border_style="cyan",
                 ))
-                start_new_turn(conversation.messages)
+                session.start_new_turn(conversation.messages)
                 conversation.add_user_message(task)
                 run_agent_loop(
                     conversation,
+                    session,
                     args.model,
                     system_prompt,
                     num_ctx=args.context,
@@ -1212,19 +1189,20 @@ def main():
                 continue
 
             # Cancel plan mode
-            if plan_mode and user_input.strip().lower() in ("/cancel", "cancel", "nevermind", "abort"):
-                plan_mode = False
+            if session.plan_mode and user_input.strip().lower() in ("/cancel", "cancel", "nevermind", "abort"):
+                session.plan_mode = False
                 console.print("[dim]Plan cancelled.[/dim]")
                 continue
 
             # Check if user is approving a plan
-            if plan_mode and user_input.strip().lower() in EXECUTE_TRIGGERS:
-                plan_mode = False
+            if session.plan_mode and user_input.strip().lower() in EXECUTE_TRIGGERS:
+                session.plan_mode = False
                 console.print("[cyan]Executing plan...[/cyan]")
-                start_new_turn(conversation.messages)
+                session.start_new_turn(conversation.messages)
                 conversation.add_user_message("Execute the plan now. Use the tools to make the changes.")
                 run_agent_loop(
                     conversation,
+                    session,
                     args.model,
                     system_prompt,
                     num_ctx=args.context,
@@ -1235,12 +1213,13 @@ def main():
                 continue
 
             # Exit plan mode on other input (feedback or new task)
-            if plan_mode:
+            if session.plan_mode:
                 # User is giving feedback on the plan
-                start_new_turn(conversation.messages)
+                session.start_new_turn(conversation.messages)
                 conversation.add_user_message(user_input)
                 run_agent_loop(
                     conversation,
+                    session,
                     args.model,
                     system_prompt,
                     num_ctx=args.context,
@@ -1251,10 +1230,11 @@ def main():
                     conversation.save(args.session)
                 continue
 
-            start_new_turn(conversation.messages)
+            session.start_new_turn(conversation.messages)
             conversation.add_user_message(user_input)
             run_agent_loop(
                 conversation,
+                session,
                 args.model,
                 system_prompt,
                 num_ctx=args.context,
