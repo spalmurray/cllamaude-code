@@ -1120,10 +1120,6 @@ def main():
         help="Ollama model to use (default: glm-4.7-flash)"
     )
     parser.add_argument(
-        "-s", "--session",
-        help="Session file to persist conversation"
-    )
-    parser.add_argument(
         "-c", "--context",
         type=int,
         default=DEFAULT_CONTEXT_WINDOW,
@@ -1141,13 +1137,7 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load or create conversation
-    if args.session:
-        conversation = Conversation.load(args.session)
-        if conversation.messages:
-            console.print(f"[dim]Loaded {len(conversation.messages)} messages from session[/dim]")
-    else:
-        conversation = Conversation()
+    conversation = Conversation()
 
     # Create session state
     session = Session()
@@ -1168,8 +1158,6 @@ def main():
             num_ctx=args.context,
             debug=args.debug,
         )
-        if args.session:
-            conversation.save(args.session)
         return
 
     # Interactive mode
@@ -1240,8 +1228,6 @@ def main():
                     debug=args.debug,
                     planning=True,
                 )
-                if args.session:
-                    conversation.save(args.session)
                 continue
 
             # Cancel plan mode
@@ -1264,8 +1250,6 @@ def main():
                     num_ctx=args.context,
                     debug=args.debug,
                 )
-                if args.session:
-                    conversation.save(args.session)
                 continue
 
             # Exit plan mode on other input (feedback or new task)
@@ -1282,8 +1266,6 @@ def main():
                     debug=args.debug,
                     planning=True,  # Stay in planning mode for feedback
                 )
-                if args.session:
-                    conversation.save(args.session)
                 continue
 
             session.start_new_turn(conversation.messages)
@@ -1297,8 +1279,6 @@ def main():
                 debug=args.debug,
             )
 
-            if args.session:
-                conversation.save(args.session)
 
         except KeyboardInterrupt:
             console.print("\n[dim]Use 'exit' to quit[/dim]")
@@ -1307,8 +1287,6 @@ def main():
             console.print("\n[dim]Goodbye![/dim]")
             break
 
-    if args.session:
-        conversation.save(args.session)
 
 
 if __name__ == "__main__":
