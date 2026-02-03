@@ -829,6 +829,175 @@ def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
     return Confirm.ask("Execute this?", default=True)
 
 
+def call_llm_with_spinner(
+    messages: list,
+    model: str,
+    system_prompt: str,
+    num_ctx: int,
+    tokens: int,
+    pct: float,
+    turn_start_time: float,
+) -> tuple[dict | None, Exception | None]:
+    """Call the LLM in a background thread with a spinner display.
+
+    Returns (response, error) tuple.
+    """
+    response = None
+    error = None
+
+    def do_chat():
+        nonlocal response, error
+        try:
+            response = chat(messages, model=model, system_prompt=system_prompt, num_ctx=num_ctx)
+        except Exception as e:
+            error = e
+
+    thread = threading.Thread(target=do_chat)
+    thread.start()
+    invocation_start = time.time()
+
+    spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    frame_idx = 0
+    with Live(console=console, refresh_per_second=10, transient=True) as live:
+        while thread.is_alive():
+            invocation_elapsed = int(time.time() - invocation_start)
+            turn_elapsed = int(time.time() - turn_start_time)
+            width = console.width
+            left = f"{spinner_frames[frame_idx]} {turn_elapsed}s ({invocation_elapsed}s)"
+            right = f"{tokens} tokens ({pct:.0f}%)"
+            padding = width - len(left) - len(right) - 1
+
+            status_text = Text()
+            status_text.append(left, style="bold blue")
+            status_text.append(" " * max(1, padding))
+            status_text.append(right, style="dim")
+            live.update(status_text)
+
+            frame_idx = (frame_idx + 1) % len(spinner_frames)
+            thread.join(timeout=0.1)
+
+    return response, error
+
+
+def display_tool_result(name: str, args: dict, result: str, output_id: int | None) -> None:
+    """Display the result of a tool execution."""
+    id_suffix = f" [output #{output_id}]" if output_id else ""
+
+    if name in ("read_file", "read_around"):
+        lines = result.split("\n")
+        console.print(f"[dim]Read {len(lines)} lines{id_suffix}[/dim]")
+    elif name == "bash":
+        console.print(Panel(result, title=f"Output{id_suffix}", border_style="dim"))
+    elif name == "git" and not result.startswith("Error"):
+        lines = result.split("\n")
+        op = args.get("operation", "")
+        if op in ("diff", "diff_staged", "blame", "show"):
+            console.print(f"[dim]git {op}: {len(lines)} lines{id_suffix}[/dim]")
+        else:
+            console.print(Panel(result, title=f"git {op}{id_suffix}", border_style="dim"))
+    elif name in ("glob", "grep") and not result.startswith(("Error", "No ")):
+        lines = result.split("\n")
+        preview = "\n".join(lines[:20])
+        if len(lines) > 20:
+            preview += f"\n... ({len(lines) - 20} more)"
+        console.print(Panel(preview, title=f"{name} results", border_style="dim"))
+    else:
+        console.print(f"[dim]{result}[/dim]")
+
+
+def execute_tool_call(
+    name: str,
+    args: dict,
+    session: Session,
+    conversation: Conversation,
+    planning: bool,
+    auto_approve: bool,
+) -> str:
+    """Execute a single tool call and return the result string."""
+    # Block write tools in planning mode
+    if planning and name in PLANNING_BLOCKED_TOOLS:
+        result = f"Blocked in planning mode: {name}. Only read-only tools allowed."
+        console.print(f"[yellow]{result}[/yellow]")
+        return result
+
+    # Handle special tools that don't go through execute_tool
+    if name == "undo_changes":
+        num_turns = args.get("turns", 1) or 1
+        result = session.undo_turns(num_turns)
+        console.print(Panel(result, title="Undo", border_style="green"))
+        return result
+
+    if name == "ask_user":
+        question = args.get("question", "")
+        console.print(Panel(question, title="🤔 Agent Question", border_style="cyan"))
+        result = console.input("[bold cyan]Your answer:[/bold cyan] ")
+        return result if result.strip() else "(no answer provided)"
+
+    if name == "remember_file":
+        result = session.remember_file(args.get("path", ""))
+        console.print(f"[dim]{result}[/dim]")
+        return result
+
+    if name == "forget_file":
+        result = session.forget_file(args.get("path", ""), conversation.messages)
+        console.print(f"[dim]{result}[/dim]")
+        return result
+
+    if name == "remember_output":
+        result = session.remember_output(args.get("output_id"))
+        console.print(f"[dim]{result}[/dim]")
+        return result
+
+    if name == "forget_output":
+        oid = args.get("output_id")
+        if oid is None:
+            oid = session.tool_output_counter
+        result = session.forget_output(oid, conversation.messages)
+        console.print(f"[dim]{result}[/dim]")
+        return result
+
+    if name == "note":
+        result = session.add_note(args.get("content", ""))
+        console.print(f"[dim]{result}[/dim]")
+        return result
+
+    if name == "clear_note":
+        result = session.clear_note(args.get("note_id"))
+        console.print(f"[dim]{result}[/dim]")
+        return result
+
+    # Confirm destructive operations
+    if not confirm_tool(name, args, auto_approve):
+        console.print("[yellow]Cancelled[/yellow]")
+        return "Tool execution cancelled by user."
+
+    # Capture file content before write/edit for undo
+    old_content = None
+    file_path = None
+    if name in ("write_file", "edit_file"):
+        file_path = args.get("path", "")
+        p = Path(file_path).expanduser().resolve()
+        if p.exists() and p.is_file():
+            try:
+                old_content = p.read_text()
+            except Exception:
+                pass
+
+    result = execute_tool(name, args)
+
+    # Record successful file changes for undo
+    if name in ("write_file", "edit_file") and not result.startswith("Error"):
+        new_content = args.get("content", "") if name == "write_file" else ""
+        if name == "edit_file":
+            try:
+                new_content = Path(file_path).expanduser().resolve().read_text()
+            except Exception:
+                new_content = ""
+        session.record_change(file_path, old_content, new_content, name.replace("_file", ""))
+
+    return result
+
+
 def run_agent_loop(
     conversation: Conversation,
     session: Session,
@@ -841,12 +1010,14 @@ def run_agent_loop(
     turn_start_time: float | None = None,
 ) -> None:
     """Run the agent loop until no more tool calls."""
-    # In planning mode, append planning instructions to system prompt
     base_system_prompt = system_prompt
     if planning:
         base_system_prompt = base_system_prompt + "\n" + PLAN_MODE_PROMPT
     if turn_start_time is None:
         turn_start_time = time.time()
+
+    compressible_tools = {"read_file", "read_around", "git", "bash", "grep", "glob"}
+
     while True:
         # Build full system prompt with notes
         full_system_prompt = base_system_prompt
@@ -856,45 +1027,11 @@ def run_agent_loop(
 
         tokens, pct = get_context_usage(conversation.messages, full_system_prompt, num_ctx)
 
-        # Non-streaming request with spinner
-        response = None
-        error = None
-        invocation_start = time.time()
-
-        def do_chat():
-            nonlocal response, error
-            try:
-                response = chat(
-                    conversation.messages,
-                    model=model,
-                    system_prompt=full_system_prompt,
-                    num_ctx=num_ctx,
-                )
-            except Exception as e:
-                error = e
-
-        thread = threading.Thread(target=do_chat)
-        thread.start()
-
-        spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-        frame_idx = 0
-        with Live(console=console, refresh_per_second=10, transient=True) as live:
-            while thread.is_alive():
-                invocation_elapsed = int(time.time() - invocation_start)
-                turn_elapsed = int(time.time() - turn_start_time)
-                width = console.width
-                left = f"{spinner_frames[frame_idx]} {turn_elapsed}s ({invocation_elapsed}s)"
-                right = f"{tokens} tokens ({pct:.0f}%)"
-                padding = width - len(left) - len(right) - 1
-
-                status_text = Text()
-                status_text.append(left, style="bold blue")
-                status_text.append(" " * max(1, padding))
-                status_text.append(right, style="dim")
-                live.update(status_text)
-
-                frame_idx = (frame_idx + 1) % len(spinner_frames)
-                thread.join(timeout=0.1)
+        # Call LLM with spinner
+        response, error = call_llm_with_spinner(
+            conversation.messages, model, full_system_prompt, num_ctx,
+            tokens, pct, turn_start_time
+        )
 
         if error:
             error_str = str(error)
@@ -905,7 +1042,6 @@ def run_agent_loop(
 
         message = get_attr(response, "message", {})
 
-        # Debug: show raw message
         if debug:
             console.print(f"[dim]DEBUG message: {message}[/dim]")
 
@@ -922,138 +1058,7 @@ def run_agent_loop(
             if tool_calls:
                 console.print("[dim](parsed tool call from text)[/dim]")
 
-        if tool_calls:
-            # Add the assistant's tool call message
-            conversation.add_assistant_tool_calls(tool_calls)
-
-            # Execute each tool
-            for tool_call in tool_calls:
-                func = tool_call.get("function", {})
-                name = func.get("name", "")
-                args = func.get("arguments", {})
-
-                console.print(f"[dim]Tool:[/dim] {format_tool_call(name, args)}")
-
-                # Tools that generate outputs needing note/forget
-                compressible = {"read_file", "read_around", "git", "bash", "grep", "glob"}
-
-                # Block write tools in planning mode
-                if planning and name in PLANNING_BLOCKED_TOOLS:
-                    result = f"Blocked in planning mode: {name}. Only read-only tools allowed."
-                    console.print(f"[yellow]{result}[/yellow]")
-                # Handle undo_changes specially (not through execute_tool)
-                elif name == "undo_changes":
-                    num_turns = args.get("turns", 1) or 1
-                    result = session.undo_turns(num_turns)
-                    console.print(Panel(result, title="Undo", border_style="green"))
-                # Handle ask_user specially (requires user interaction)
-                elif name == "ask_user":
-                    question = args.get("question", "")
-                    console.print(Panel(question, title="🤔 Agent Question", border_style="cyan"))
-                    result = console.input("[bold cyan]Your answer:[/bold cyan] ")
-                    if not result.strip():
-                        result = "(no answer provided)"
-                # Handle remember_file specially (marks file to keep in context)
-                elif name == "remember_file":
-                    file_path = args.get("path", "")
-                    result = session.remember_file(file_path)
-                    console.print(f"[dim]{result}[/dim]")
-                # Handle forget_file specially (un-remembers and compresses immediately)
-                elif name == "forget_file":
-                    file_path = args.get("path", "")
-                    result = session.forget_file(file_path, conversation.messages)
-                    console.print(f"[dim]{result}[/dim]")
-                # Handle remember_output specially
-                elif name == "remember_output":
-                    oid = args.get("output_id")
-                    result = session.remember_output(oid)
-                    console.print(f"[dim]{result}[/dim]")
-                # Handle forget_output specially (compresses immediately)
-                elif name == "forget_output":
-                    oid = args.get("output_id")
-                    if oid is None:
-                        oid = session.tool_output_counter
-                    result = session.forget_output(oid, conversation.messages)
-                    console.print(f"[dim]{result}[/dim]")
-                # Handle note specially
-                elif name == "note":
-                    content = args.get("content", "")
-                    result = session.add_note(content)
-                    console.print(f"[dim]{result}[/dim]")
-                # Handle clear_note specially
-                elif name == "clear_note":
-                    nid = args.get("note_id")
-                    result = session.clear_note(nid)
-                    console.print(f"[dim]{result}[/dim]")
-                # Confirm destructive operations
-                elif not confirm_tool(name, args, auto_approve):
-                    result = "Tool execution cancelled by user."
-                    console.print("[yellow]Cancelled[/yellow]")
-                else:
-                    # Capture file content before write/edit for undo
-                    if name in ("write_file", "edit_file"):
-                        file_path = args.get("path", "")
-                        p = Path(file_path).expanduser().resolve()
-                        old_content = None
-                        if p.exists() and p.is_file():
-                            try:
-                                old_content = p.read_text()
-                            except Exception:
-                                pass
-
-                    result = execute_tool(name, args)
-
-                    # Record successful file changes for undo
-                    if name in ("write_file", "edit_file") and not result.startswith("Error"):
-                        new_content = args.get("content", "") if name == "write_file" else ""
-                        if name == "edit_file":
-                            # For edit, read the new content
-                            try:
-                                new_content = Path(file_path).expanduser().resolve().read_text()
-                            except Exception:
-                                new_content = ""
-                        session.record_change(file_path, old_content, new_content, name.replace("_file", ""))
-                    # Show result preview for some operations
-                    # Get output ID for display
-                    display_id = session.tool_output_counter if name in {"read_file", "read_around", "git", "bash", "grep", "glob"} else None
-                    id_suffix = f" [output #{display_id}]" if display_id else ""
-
-                    if name in ("read_file", "read_around"):
-                        lines = result.split("\n")
-                        console.print(f"[dim]Read {len(lines)} lines{id_suffix}[/dim]")
-                    elif name == "bash":
-                        console.print(Panel(result, title=f"Output{id_suffix}", border_style="dim"))
-                    elif name == "git" and not result.startswith("Error"):
-                        lines = result.split("\n")
-                        op = args.get("operation", "")
-                        # Don't show full diff output, just summary
-                        if op in ("diff", "diff_staged", "blame", "show"):
-                            console.print(f"[dim]git {op}: {len(lines)} lines{id_suffix}[/dim]")
-                        else:
-                            title = f"git {op}{id_suffix}"
-                            console.print(Panel(result, title=title, border_style="dim"))
-                    elif name in ("glob", "grep") and not result.startswith(("Error", "No ")):
-                        lines = result.split("\n")
-                        preview = "\n".join(lines[:20])
-                        if len(lines) > 20:
-                            preview += f"\n... ({len(lines) - 20} more)"
-                        console.print(Panel(preview, title=f"{name} results", border_style="dim"))
-                    else:
-                        console.print(f"[dim]{result}[/dim]")
-
-                # Assign output ID for compressible outputs and track pending
-                output_id = session.get_next_output_id() if name in compressible else None
-
-                result_for_context = result
-
-                conversation.add_tool_result(
-                    tool_call_id=str(id(tool_call)),
-                    name=name,
-                    result=result_for_context,
-                    output_id=output_id,
-                )
-
-        else:
+        if not tool_calls:
             # No tool calls, just a text response
             if content:
                 conversation.add_assistant_message(content)
@@ -1062,6 +1067,37 @@ def run_agent_loop(
             else:
                 console.print("[dim](no response)[/dim]")
             break
+
+        # Add the assistant's tool call message
+        conversation.add_assistant_tool_calls(tool_calls)
+
+        # Execute each tool
+        for tool_call in tool_calls:
+            func = tool_call.get("function", {})
+            name = func.get("name", "")
+            args = func.get("arguments", {})
+
+            console.print(f"[dim]Tool:[/dim] {format_tool_call(name, args)}")
+
+            # Execute the tool
+            result = execute_tool_call(name, args, session, conversation, planning, auto_approve)
+
+            # Assign output ID for compressible outputs (do this first so display shows correct ID)
+            output_id = session.get_next_output_id() if name in compressible_tools else None
+
+            # Display result for tools that go through execute_tool
+            if name not in PLANNING_BLOCKED_TOOLS or not planning:
+                if name not in ("undo_changes", "ask_user", "remember_file", "forget_file",
+                               "remember_output", "forget_output", "note", "clear_note"):
+                    if result != "Tool execution cancelled by user.":
+                        display_tool_result(name, args, result, output_id)
+
+            conversation.add_tool_result(
+                tool_call_id=str(id(tool_call)),
+                name=name,
+                result=result,
+                output_id=output_id,
+            )
 
 
 def main():
