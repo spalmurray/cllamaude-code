@@ -21,6 +21,13 @@ from rich.live import Live
 from rich.text import Text
 from rich.table import Table
 
+from .config import (
+    MAX_CHANGE_HISTORY, HISTORY_DISPLAY_LIMIT, DEFAULT_CONTEXT_WINDOW,
+    COMMAND_DISPLAY_MAX, QUESTION_PREVIEW_MAX, NOTE_PREVIEW_MAX,
+    MAX_FUNCTIONS_IN_SUMMARY, RESULT_PREVIEW_LINES, SPINNER_REFRESH_RATE,
+    COMPRESSIBLE_TOOLS, PLANNING_BLOCKED_TOOLS, EXECUTE_TRIGGERS,
+    MAX_IMPORTS_DISPLAY, MAX_CLASSES_DISPLAY, MAX_FUNCTIONS_DISPLAY,
+)
 from .conversation import Conversation
 from .llm import chat, get_system_prompt
 from .tools import execute_tool, is_error
@@ -41,7 +48,6 @@ class FileChange:
     turn: int  # Which conversation turn this belongs to
 
 
-MAX_HISTORY = 50  # Keep last 50 changes
 
 
 @dataclass
@@ -71,7 +77,7 @@ class Session:
             timestamp=datetime.now(),
             turn=self.current_turn,
         ))
-        if len(self.change_history) > MAX_HISTORY:
+        if len(self.change_history) > MAX_CHANGE_HISTORY:
             self.change_history.pop(0)
 
     def undo_turns(self, num_turns: int = 1) -> str:
@@ -121,7 +127,7 @@ class Session:
         table.add_column("Op")
         table.add_column("File")
 
-        for change in reversed(self.change_history[-15:]):
+        for change in reversed(self.change_history[-HISTORY_DISPLAY_LIMIT:]):
             time_str = change.timestamp.strftime("%H:%M:%S")
             table.add_row(str(change.turn), time_str, change.operation, change.path)
 
@@ -269,10 +275,6 @@ After exploring, output a plan that:
 Format your plan as a numbered list. Wait for user approval before making changes.
 """
 
-PLANNING_BLOCKED_TOOLS = {"write_file", "edit_file", "bash", "undo_changes"}
-
-EXECUTE_TRIGGERS = {"do it", "doit", "ok", "go", "execute", "proceed", "yes", "run it", "looks good", "lgtm"}
-
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count (roughly 4 chars per token)."""
@@ -362,9 +364,9 @@ def extract_file_structure(content: str, language: str) -> dict:
                     functions.append(match.group(1))
 
     return {
-        "imports": imports[:10],  # Limit to avoid bloat
-        "classes": classes[:10],
-        "functions": functions[:15],
+        "imports": imports[:MAX_IMPORTS_DISPLAY],
+        "classes": classes[:MAX_CLASSES_DISPLAY],
+        "functions": functions[:MAX_FUNCTIONS_DISPLAY],
     }
 
 
@@ -389,9 +391,9 @@ def compress_file_content(path: str, content: str) -> str:
         summary_parts.append(f"Classes: {', '.join(structure['classes'])}")
 
     if structure["functions"]:
-        summary_parts.append(f"Functions: {', '.join(structure['functions'][:10])}")
-        if len(structure["functions"]) > 10:
-            summary_parts[-1] += f" (+{len(structure['functions']) - 10} more)"
+        summary_parts.append(f"Functions: {', '.join(structure['functions'][:MAX_FUNCTIONS_IN_SUMMARY])}")
+        if len(structure["functions"]) > MAX_FUNCTIONS_IN_SUMMARY:
+            summary_parts[-1] += f" (+{len(structure['functions']) - MAX_FUNCTIONS_IN_SUMMARY} more)"
 
     return "\n".join(summary_parts)
 
@@ -425,8 +427,8 @@ def summarize_tool_output(name: str, args: dict, result: str) -> str:
     elif name == "bash":
         cmd = args.get("command", "?")
         # Truncate long commands
-        if len(cmd) > 50:
-            cmd = cmd[:47] + "..."
+        if len(cmd) > COMMAND_DISPLAY_MAX:
+            cmd = cmd[:COMMAND_DISPLAY_MAX - 3] + "..."
         return f"[bash '{cmd}': {line_count} lines output]"
 
     elif name == "grep":
@@ -447,14 +449,14 @@ def compress_old_tool_outputs(messages: list, session: Session, keep_recent: int
     Skips remembered files and remembered outputs.
     """
     # Tools that can be compressed
-    compressible_tools = {"read_file", "git", "bash", "grep", "glob"}
+    COMPRESSIBLE_TOOLS = {"read_file", "git", "bash", "grep", "glob"}
 
     # Find all compressible tool results
     tool_entries = []  # [(index, name, args, output_id), ...]
     for i, msg in enumerate(messages):
         if msg.get("role") == "tool":
             name = msg.get("name", "")
-            if name not in compressible_tools:
+            if name not in COMPRESSIBLE_TOOLS:
                 continue
 
             content = msg.get("content", "")
@@ -497,7 +499,7 @@ def compress_old_tool_outputs(messages: list, session: Session, keep_recent: int
             messages[idx]["content"] = summarize_tool_output(name, args, messages[idx]["content"])
 
 
-def get_context_usage(messages: list, system_prompt: str, max_tokens: int = 32768) -> tuple[int, float]:
+def get_context_usage(messages: list, system_prompt: str, max_tokens: int = DEFAULT_CONTEXT_WINDOW) -> tuple[int, float]:
     """Calculate estimated token usage and percentage."""
     total_text = system_prompt
     for msg in messages:
@@ -598,7 +600,7 @@ def format_tool_call(name: str, args: dict) -> str:
         return f"grep({pattern})"
     elif name == "ask_user":
         question = args.get("question", "?")
-        preview = question[:50] + "..." if len(question) > 50 else question
+        preview = question[:QUESTION_PREVIEW_MAX] + "..." if len(question) > QUESTION_PREVIEW_MAX else question
         return f"ask_user({preview})"
     elif name == "remember_file":
         return f"remember_file({args.get('path', '?')})"
@@ -612,7 +614,7 @@ def format_tool_call(name: str, args: dict) -> str:
         return f"forget_output(#{oid})"
     elif name == "note":
         content = args.get("content", "")
-        preview = content[:40] + "..." if len(content) > 40 else content
+        preview = content[:NOTE_PREVIEW_MAX] + "..." if len(content) > NOTE_PREVIEW_MAX else content
         return f"note({preview})"
     elif name == "clear_note":
         nid = args.get("note_id", "all")
@@ -858,7 +860,7 @@ def call_llm_with_spinner(
 
     spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     frame_idx = 0
-    with Live(console=console, refresh_per_second=10, transient=True) as live:
+    with Live(console=console, refresh_per_second=SPINNER_REFRESH_RATE, transient=True) as live:
         while thread.is_alive():
             invocation_elapsed = int(time.time() - invocation_start)
             turn_elapsed = int(time.time() - turn_start_time)
@@ -897,9 +899,9 @@ def display_tool_result(name: str, args: dict, result: str, output_id: int | Non
             console.print(Panel(result, title=f"git {op}{id_suffix}", border_style="dim"))
     elif name in ("glob", "grep") and not is_error(result) and not result.startswith("No "):
         lines = result.split("\n")
-        preview = "\n".join(lines[:20])
-        if len(lines) > 20:
-            preview += f"\n... ({len(lines) - 20} more)"
+        preview = "\n".join(lines[:RESULT_PREVIEW_LINES])
+        if len(lines) > RESULT_PREVIEW_LINES:
+            preview += f"\n... ({len(lines) - RESULT_PREVIEW_LINES} more)"
         console.print(Panel(preview, title=f"{name} results", border_style="dim"))
     else:
         console.print(f"[dim]{result}[/dim]")
@@ -1004,7 +1006,7 @@ def run_agent_loop(
     model: str,
     system_prompt: str,
     auto_approve: bool = False,
-    num_ctx: int = 32768,
+    num_ctx: int = DEFAULT_CONTEXT_WINDOW,
     debug: bool = False,
     planning: bool = False,
     turn_start_time: float | None = None,
@@ -1015,8 +1017,6 @@ def run_agent_loop(
         base_system_prompt = base_system_prompt + "\n" + PLAN_MODE_PROMPT
     if turn_start_time is None:
         turn_start_time = time.time()
-
-    compressible_tools = {"read_file", "read_around", "git", "bash", "grep", "glob"}
 
     while True:
         # Build full system prompt with notes
@@ -1083,7 +1083,7 @@ def run_agent_loop(
             result = execute_tool_call(name, args, session, conversation, planning, auto_approve)
 
             # Assign output ID for compressible outputs (do this first so display shows correct ID)
-            output_id = session.get_next_output_id() if name in compressible_tools else None
+            output_id = session.get_next_output_id() if name in COMPRESSIBLE_TOOLS else None
 
             # Display result for tools that go through execute_tool
             if name not in PLANNING_BLOCKED_TOOLS or not planning:
@@ -1114,8 +1114,8 @@ def main():
     parser.add_argument(
         "-c", "--context",
         type=int,
-        default=32768,
-        help="Context window size in tokens (default: 32768)"
+        default=DEFAULT_CONTEXT_WINDOW,
+        help=f"Context window size in tokens (default: {DEFAULT_CONTEXT_WINDOW})"
     )
     parser.add_argument(
         "-d", "--debug",

@@ -3,6 +3,7 @@
 import ollama
 from pathlib import Path
 
+from .config import DEFAULT_CONTEXT_WINDOW
 from .tools import TOOLS
 
 
@@ -125,7 +126,7 @@ def chat(
     messages: list[dict],
     model: str = "glm-4.7-flash",
     system_prompt: str | None = None,
-    num_ctx: int = 32768,
+    num_ctx: int = DEFAULT_CONTEXT_WINDOW,
 ) -> dict:
     """Send a chat request to Ollama and return the response."""
     full_messages = []

@@ -6,6 +6,11 @@ import re
 import subprocess
 from pathlib import Path
 
+from .config import (
+    IGNORED_DIRS, DEFAULT_READ_CONTEXT, MAX_GLOB_RESULTS, MAX_GREP_RESULTS,
+    BASH_TIMEOUT, GIT_TIMEOUT, GIT_LOG_DEFAULT_LINES,
+)
+
 
 # --- Error handling utilities ---
 
@@ -42,14 +47,6 @@ def permission_denied(path: str) -> str:
     return tool_error(f"Permission denied: {path}")
 
 
-# --- Configuration ---
-
-# Directories to ignore in glob/grep
-IGNORED_DIRS = {
-    ".venv", "venv", "node_modules", ".git", "__pycache__",
-    ".pytest_cache", ".mypy_cache", ".tox", "dist", "build",
-    ".eggs", "*.egg-info", ".cache", ".ruff_cache",
-}
 
 
 def should_ignore_path(path: Path) -> bool:
@@ -420,7 +417,7 @@ def read_file(path: str, start_line: int | None = None, end_line: int | None = N
         return tool_error(f"Reading file: {e}")
 
 
-def read_around(path: str, line: int, context: int = 10) -> str:
+def read_around(path: str, line: int, context: int = DEFAULT_READ_CONTEXT) -> str:
     """Read lines around a specific line number."""
     start = max(1, line - context)
     end = line + context
@@ -448,7 +445,7 @@ def bash(command: str) -> str:
             shell=True,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=BASH_TIMEOUT,
             cwd=os.getcwd(),
         )
         output = ""
@@ -462,7 +459,7 @@ def bash(command: str) -> str:
             output += f"\n[exit code: {result.returncode}]"
         return output if output else "(no output)"
     except subprocess.TimeoutExpired:
-        return tool_error("Command timed out after 60 seconds")
+        return tool_error(f"Command timed out after {BASH_TIMEOUT} seconds")
     except Exception as e:
         return tool_error(f"Executing command: {e}")
 
@@ -511,8 +508,8 @@ def glob_files(pattern: str, path: str | None = None) -> str:
             return f"No files found matching '{pattern}'"
 
         # Limit output
-        if len(files) > 100:
-            return "\n".join(files[:100]) + f"\n... and {len(files) - 100} more files"
+        if len(files) > MAX_GLOB_RESULTS:
+            return "\n".join(files[:MAX_GLOB_RESULTS]) + f"\n... and {len(files) - MAX_GLOB_RESULTS} more files"
         return "\n".join(files)
     except Exception as e:
         return tool_error(f"Searching files: {e}")
@@ -531,7 +528,7 @@ def grep_files(pattern: str, path: str | None = None, glob_pattern: str | None =
             return path_not_found(path)
 
         results = []
-        max_results = 100
+        max_results = MAX_GREP_RESULTS
 
         if base.is_file():
             files = [base]
@@ -580,7 +577,7 @@ def git_command(operation: str, args: str | None = None) -> str:
         "status": "git status",
         "diff": "git diff",
         "diff_staged": "git diff --staged",
-        "log": "git log --oneline -20",
+        "log": f"git log --oneline -{GIT_LOG_DEFAULT_LINES}",
         "branch": "git branch -a",
         "show": "git show",
         "blame": "git blame",
@@ -593,7 +590,7 @@ def git_command(operation: str, args: str | None = None) -> str:
 
     # Append args if provided
     if args:
-        # For log, allow overriding the default -20
+        # For log, allow overriding the default
         if operation == "log" and args.strip().startswith("-n"):
             cmd = f"git log --oneline {args}"
         else:
@@ -605,7 +602,7 @@ def git_command(operation: str, args: str | None = None) -> str:
             shell=True,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=GIT_TIMEOUT,
             cwd=os.getcwd(),
         )
         output = ""
