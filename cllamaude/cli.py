@@ -27,7 +27,7 @@ from .tools import execute_tool
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "forget_file", "remember_output", "forget_output", "git"}
+TOOL_NAMES = {"read_file", "read_around", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "forget_file", "remember_output", "forget_output", "git", "note", "clear_note"}
 
 
 @dataclass
@@ -58,6 +58,10 @@ remembered_outputs: set[int] = set()
 # Counter for tool outputs
 tool_output_counter: int = 0
 
+# Notes - free-form memory that persists
+notes: list[str] = []
+
+
 
 PLAN_MODE_PROMPT = """
 You are in PLANNING MODE. The user wants you to create a plan before taking action.
@@ -75,7 +79,7 @@ Format your plan as a numbered list. Wait for user approval before making change
 
 PLANNING_BLOCKED_TOOLS = {"write_file", "edit_file", "bash", "undo_changes"}
 
-EXECUTE_TRIGGERS = {"do it", "ok", "go", "execute", "proceed", "yes", "run it", "looks good", "lgtm"}
+EXECUTE_TRIGGERS = {"do it", "doit", "ok", "go", "execute", "proceed", "yes", "run it", "looks good", "lgtm"}
 
 
 def start_new_turn(messages: list | None = None) -> None:
@@ -389,6 +393,36 @@ def remember_output(output_id: int | None = None) -> str:
     return f"Remembered output #{output_id}"
 
 
+def add_note(content: str) -> str:
+    """Add a note to persistent memory."""
+    note_id = len(notes)
+    notes.append(content)
+    return f"Added note #{note_id}"
+
+
+def clear_note(note_id: int | None = None) -> str:
+    """Clear a note by ID, or all notes if no ID given."""
+    if note_id is None:
+        count = len(notes)
+        notes.clear()
+        return f"Cleared all {count} notes"
+    if 0 <= note_id < len(notes):
+        notes[note_id] = ""  # Mark as cleared but keep indices stable
+        return f"Cleared note #{note_id}"
+    return f"Note #{note_id} not found"
+
+
+def get_notes_context() -> str:
+    """Get notes formatted for inclusion in context."""
+    active_notes = [(i, n) for i, n in enumerate(notes) if n]
+    if not active_notes:
+        return ""
+    lines = ["## Your Notes"]
+    for i, content in active_notes:
+        lines.append(f"[{i}] {content}")
+    return "\n".join(lines)
+
+
 def forget_output(output_id: int | None = None, messages: list | None = None) -> str:
     """Forget a tool output by ID and immediately compress it."""
     if output_id is None:
@@ -556,7 +590,17 @@ def parse_tool_calls_from_text(content: str) -> list[dict] | None:
 def format_tool_call(name: str, args: dict) -> str:
     """Format a tool call for display."""
     if name == "read_file":
-        return f"read_file({args.get('path', '?')})"
+        path = args.get('path', '?')
+        start = args.get('start_line')
+        end = args.get('end_line')
+        if start and end:
+            return f"read_file({path}, {start}-{end})"
+        return f"read_file({path})"
+    elif name == "read_around":
+        path = args.get('path', '?')
+        line = args.get('line', '?')
+        ctx = args.get('context', 10)
+        return f"read_around({path}, line {line}, ±{ctx})"
     elif name == "write_file":
         path = args.get("path", "?")
         content = args.get("content", "")
@@ -590,6 +634,13 @@ def format_tool_call(name: str, args: dict) -> str:
     elif name == "forget_output":
         oid = args.get("output_id", "last")
         return f"forget_output(#{oid})"
+    elif name == "note":
+        content = args.get("content", "")
+        preview = content[:40] + "..." if len(content) > 40 else content
+        return f"note({preview})"
+    elif name == "clear_note":
+        nid = args.get("note_id", "all")
+        return f"clear_note(#{nid})"
     elif name == "git":
         op = args.get("operation", "?")
         extra = args.get("args", "")
@@ -644,6 +695,10 @@ def is_safe_bash_command(command: str) -> bool:
 
     cmd = parts[0]
     cwd = Path.cwd().resolve()
+
+    # uv run pytest is always safe
+    if cmd == "uv" and len(parts) >= 2 and parts[1] == "run" and len(parts) >= 3 and parts[2] == "pytest":
+        return True
 
     # ls, find, grep are safe if targeting cwd or subdirectories
     if cmd in ("ls", "find", "grep"):
@@ -723,8 +778,8 @@ def is_dangerous_git_command(command: str) -> str | None:
 
 def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
     """Ask for confirmation before executing a destructive tool."""
-    if name in ("read_file", "glob", "grep", "git"):
-        # Read operations are safe, no confirmation needed
+    if name in ("read_file", "read_around", "glob", "grep", "git", "note", "clear_note"):
+        # Read operations and notes are safe, no confirmation needed
         return True
 
     console.print()
@@ -806,18 +861,28 @@ def run_agent_loop(
     num_ctx: int = 32768,
     debug: bool = False,
     planning: bool = False,
+    turn_start_time: float | None = None,
 ) -> None:
     """Run the agent loop until no more tool calls."""
     # In planning mode, append planning instructions to system prompt
+    base_system_prompt = system_prompt
     if planning:
-        system_prompt = system_prompt + "\n" + PLAN_MODE_PROMPT
+        base_system_prompt = base_system_prompt + "\n" + PLAN_MODE_PROMPT
+    if turn_start_time is None:
+        turn_start_time = time.time()
     while True:
-        tokens, pct = get_context_usage(conversation.messages, system_prompt, num_ctx)
+        # Build full system prompt with notes
+        full_system_prompt = base_system_prompt
+        notes_ctx = get_notes_context()
+        if notes_ctx:
+            full_system_prompt = full_system_prompt + "\n\n" + notes_ctx
+
+        tokens, pct = get_context_usage(conversation.messages, full_system_prompt, num_ctx)
 
         # Non-streaming request with spinner
         response = None
         error = None
-        start_time = time.time()
+        invocation_start = time.time()
 
         def do_chat():
             nonlocal response, error
@@ -825,7 +890,7 @@ def run_agent_loop(
                 response = chat(
                     conversation.messages,
                     model=model,
-                    system_prompt=system_prompt,
+                    system_prompt=full_system_prompt,
                     num_ctx=num_ctx,
                 )
             except Exception as e:
@@ -838,9 +903,10 @@ def run_agent_loop(
         frame_idx = 0
         with Live(console=console, refresh_per_second=10, transient=True) as live:
             while thread.is_alive():
-                elapsed = int(time.time() - start_time)
+                invocation_elapsed = int(time.time() - invocation_start)
+                turn_elapsed = int(time.time() - turn_start_time)
                 width = console.width
-                left = f"{spinner_frames[frame_idx]} {elapsed}s"
+                left = f"{spinner_frames[frame_idx]} {turn_elapsed}s ({invocation_elapsed}s)"
                 right = f"{tokens} tokens ({pct:.0f}%)"
                 padding = width - len(left) - len(right) - 1
 
@@ -854,6 +920,10 @@ def run_agent_loop(
                 thread.join(timeout=0.1)
 
         if error:
+            error_str = str(error)
+            if "failed to parse XML" in error_str or "syntax error" in error_str.lower():
+                console.print("[red]Model generated malformed output (XML parse error). Try a simpler prompt or say 'continue'.[/red]")
+                break
             raise error
 
         message = get_attr(response, "message", {})
@@ -886,6 +956,9 @@ def run_agent_loop(
                 args = func.get("arguments", {})
 
                 console.print(f"[dim]Tool:[/dim] {format_tool_call(name, args)}")
+
+                # Tools that generate outputs needing note/forget
+                compressible = {"read_file", "read_around", "git", "bash", "grep", "glob"}
 
                 # Block write tools in planning mode
                 if planning and name in PLANNING_BLOCKED_TOOLS:
@@ -921,7 +994,19 @@ def run_agent_loop(
                 # Handle forget_output specially (compresses immediately)
                 elif name == "forget_output":
                     oid = args.get("output_id")
+                    if oid is None:
+                        oid = tool_output_counter
                     result = forget_output(oid, conversation.messages)
+                    console.print(f"[dim]{result}[/dim]")
+                # Handle note specially
+                elif name == "note":
+                    content = args.get("content", "")
+                    result = add_note(content)
+                    console.print(f"[dim]{result}[/dim]")
+                # Handle clear_note specially
+                elif name == "clear_note":
+                    nid = args.get("note_id")
+                    result = clear_note(nid)
                     console.print(f"[dim]{result}[/dim]")
                 # Confirm destructive operations
                 elif not confirm_tool(name, args, auto_approve):
@@ -953,10 +1038,10 @@ def run_agent_loop(
                         record_change(file_path, old_content, new_content, name.replace("_file", ""))
                     # Show result preview for some operations
                     # Get output ID for display
-                    display_id = tool_output_counter if name in {"read_file", "git", "bash", "grep", "glob"} else None
+                    display_id = tool_output_counter if name in {"read_file", "read_around", "git", "bash", "grep", "glob"} else None
                     id_suffix = f" [output #{display_id}]" if display_id else ""
 
-                    if name == "read_file":
+                    if name in ("read_file", "read_around"):
                         lines = result.split("\n")
                         console.print(f"[dim]Read {len(lines)} lines{id_suffix}[/dim]")
                     elif name == "bash":
@@ -979,14 +1064,15 @@ def run_agent_loop(
                     else:
                         console.print(f"[dim]{result}[/dim]")
 
-                # Assign output ID for compressible outputs
-                compressible = {"read_file", "git", "bash", "grep", "glob"}
+                # Assign output ID for compressible outputs and track pending
                 output_id = get_next_output_id() if name in compressible else None
+
+                result_for_context = result
 
                 conversation.add_tool_result(
                     tool_call_id=str(id(tool_call)),
                     name=name,
-                    result=result,
+                    result=result_for_context,
                     output_id=output_id,
                 )
 
@@ -1088,6 +1174,7 @@ def main():
                 conversation.clear()
                 remembered_files.clear()
                 remembered_outputs.clear()
+                notes.clear()
                 tool_output_counter = 0
                 console.print("[dim]Conversation cleared.[/dim]")
                 continue

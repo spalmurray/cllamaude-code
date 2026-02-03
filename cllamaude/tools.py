@@ -28,7 +28,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file at the given path. Optionally read only specific lines.",
+            "description": "Read specific lines from a file. Use grep first to find relevant line numbers.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -38,14 +38,39 @@ TOOLS = [
                     },
                     "start_line": {
                         "type": "integer",
-                        "description": "First line to read (1-indexed, inclusive). Omit to start from beginning.",
+                        "description": "First line to read (1-indexed, inclusive)",
                     },
                     "end_line": {
                         "type": "integer",
-                        "description": "Last line to read (1-indexed, inclusive). Omit to read to end.",
+                        "description": "Last line to read (1-indexed, inclusive)",
                     },
                 },
-                "required": ["path"],
+                "required": ["path", "start_line", "end_line"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_around",
+            "description": "Read lines around a specific line number (useful after grep).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the file to read",
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "The center line number (1-indexed)",
+                    },
+                    "context": {
+                        "type": "integer",
+                        "description": "Number of lines to include above and below (default: 10)",
+                    },
+                },
+                "required": ["path", "line"],
             },
         },
     },
@@ -81,7 +106,7 @@ TOOLS = [
                     "command": {
                         "type": "string",
                         "description": "The bash command to execute",
-                    }
+                    },
                 },
                 "required": ["command"],
             },
@@ -263,6 +288,40 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "note",
+            "description": "Save important information to persistent notes. Use this to remember key details from files or outputs, then forget the original to save context. Notes persist across the conversation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The information to remember (e.g., 'config.py: DB_HOST on line 15, uses environment variable')",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_note",
+            "description": "Clear a note by ID, or all notes if no ID given.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {
+                        "type": "integer",
+                        "description": "The note ID to clear. If not provided, clears all notes.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git",
             "description": "Run read-only git commands to understand repository state.",
             "parameters": {
@@ -286,7 +345,7 @@ TOOLS = [
 
 
 def read_file(path: str, start_line: int | None = None, end_line: int | None = None) -> str:
-    """Read a file and return its contents, optionally a specific line range."""
+    """Read a specific line range from a file."""
     try:
         p = Path(path).expanduser().resolve()
         if not p.exists():
@@ -295,13 +354,12 @@ def read_file(path: str, start_line: int | None = None, end_line: int | None = N
             return f"Error: Not a file: {path}"
 
         content = p.read_text()
-
-        # If no line range specified, return full content
-        if start_line is None and end_line is None:
-            return content
-
         lines = content.splitlines()
         total_lines = len(lines)
+
+        # Require line range - no reading whole files
+        if start_line is None or end_line is None:
+            return f"Error: Must specify start_line and end_line. File has {total_lines} lines. Use grep to find relevant line numbers first."
 
         # Convert to 0-indexed, handle defaults
         start = (start_line - 1) if start_line else 0
@@ -322,6 +380,13 @@ def read_file(path: str, start_line: int | None = None, end_line: int | None = N
         return f"Error: Permission denied: {path}"
     except Exception as e:
         return f"Error reading file: {e}"
+
+
+def read_around(path: str, line: int, context: int = 10) -> str:
+    """Read lines around a specific line number."""
+    start = max(1, line - context)
+    end = line + context
+    return read_file(path, start, end)
 
 
 def write_file(path: str, content: str) -> str:
@@ -521,6 +586,7 @@ def git_command(operation: str, args: str | None = None) -> str:
 
 TOOL_FUNCTIONS = {
     "read_file": read_file,
+    "read_around": read_around,
     "write_file": write_file,
     "bash": bash,
     "edit_file": edit_file,
