@@ -1,6 +1,6 @@
 # cllamaude
 
-Ollama-powered coding CLI assistant. Like Claude Code, but with local models.
+Ollama-powered coding CLI assistant. Like Claude Code, but with local models. Yes I'm aware you can `ollama launch claude`, this is for fun and learning purposes :)
 
 ## Setup
 
