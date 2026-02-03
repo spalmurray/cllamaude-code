@@ -23,7 +23,7 @@ from rich.table import Table
 
 from .conversation import Conversation
 from .llm import chat, get_system_prompt
-from .tools import execute_tool
+from .tools import execute_tool, is_error
 
 console = Console()
 
@@ -145,7 +145,7 @@ class Session:
         for i, msg in enumerate(messages):
             if msg.get("role") == "tool" and msg.get("name") == "read_file":
                 content = msg.get("content", "")
-                if content.startswith("[File:") or content.startswith("Error"):
+                if content.startswith("[File:") or is_error(content):
                     continue
 
                 if i > 0:
@@ -193,7 +193,7 @@ class Session:
                 content = msg.get("content", "")
                 name = msg.get("name", "")
 
-                if content.startswith("[") or content.startswith("Error") or content.startswith("No "):
+                if content.startswith("[") or is_error(content) or content.startswith("No "):
                     continue
 
                 idx = messages.index(msg)
@@ -370,7 +370,7 @@ def extract_file_structure(content: str, language: str) -> dict:
 
 def compress_file_content(path: str, content: str) -> str:
     """Compress file content into a summary."""
-    if content.startswith("Error") or content.startswith("[Lines"):
+    if is_error(content) or content.startswith("[Lines"):
         return content  # Already an error or a line range read
 
     lines = content.split("\n")
@@ -459,7 +459,7 @@ def compress_old_tool_outputs(messages: list, session: Session, keep_recent: int
 
             content = msg.get("content", "")
             # Skip if already compressed or is an error
-            if content.startswith("[") or content.startswith("Error") or content.startswith("No "):
+            if content.startswith("[") or is_error(content) or content.startswith("No "):
                 continue
 
             # Get args from the preceding assistant message's tool call
@@ -888,14 +888,14 @@ def display_tool_result(name: str, args: dict, result: str, output_id: int | Non
         console.print(f"[dim]Read {len(lines)} lines{id_suffix}[/dim]")
     elif name == "bash":
         console.print(Panel(result, title=f"Output{id_suffix}", border_style="dim"))
-    elif name == "git" and not result.startswith("Error"):
+    elif name == "git" and not is_error(result):
         lines = result.split("\n")
         op = args.get("operation", "")
         if op in ("diff", "diff_staged", "blame", "show"):
             console.print(f"[dim]git {op}: {len(lines)} lines{id_suffix}[/dim]")
         else:
             console.print(Panel(result, title=f"git {op}{id_suffix}", border_style="dim"))
-    elif name in ("glob", "grep") and not result.startswith(("Error", "No ")):
+    elif name in ("glob", "grep") and not is_error(result) and not result.startswith("No "):
         lines = result.split("\n")
         preview = "\n".join(lines[:20])
         if len(lines) > 20:
@@ -986,7 +986,7 @@ def execute_tool_call(
     result = execute_tool(name, args)
 
     # Record successful file changes for undo
-    if name in ("write_file", "edit_file") and not result.startswith("Error"):
+    if name in ("write_file", "edit_file") and not is_error(result):
         new_content = args.get("content", "") if name == "write_file" else ""
         if name == "edit_file":
             try:

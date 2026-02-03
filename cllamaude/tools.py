@@ -6,6 +6,44 @@ import re
 import subprocess
 from pathlib import Path
 
+
+# --- Error handling utilities ---
+
+ERROR_PREFIX = "Error: "
+
+
+def tool_error(message: str) -> str:
+    """Create a standardized tool error message."""
+    return f"{ERROR_PREFIX}{message}"
+
+
+def is_error(result: str) -> bool:
+    """Check if a tool result is an error."""
+    return result.startswith(ERROR_PREFIX)
+
+
+def file_not_found(path: str) -> str:
+    """Error for missing file."""
+    return tool_error(f"File not found: {path}")
+
+
+def not_a_file(path: str) -> str:
+    """Error for path that isn't a file."""
+    return tool_error(f"Not a file: {path}")
+
+
+def path_not_found(path: str) -> str:
+    """Error for missing path."""
+    return tool_error(f"Path not found: {path}")
+
+
+def permission_denied(path: str) -> str:
+    """Error for permission issues."""
+    return tool_error(f"Permission denied: {path}")
+
+
+# --- Configuration ---
+
 # Directories to ignore in glob/grep
 IGNORED_DIRS = {
     ".venv", "venv", "node_modules", ".git", "__pycache__",
@@ -349,9 +387,9 @@ def read_file(path: str, start_line: int | None = None, end_line: int | None = N
     try:
         p = Path(path).expanduser().resolve()
         if not p.exists():
-            return f"Error: File not found: {path}"
+            return file_not_found(path)
         if not p.is_file():
-            return f"Error: Not a file: {path}"
+            return not_a_file(path)
 
         content = p.read_text()
         lines = content.splitlines()
@@ -359,7 +397,7 @@ def read_file(path: str, start_line: int | None = None, end_line: int | None = N
 
         # Require line range - no reading whole files
         if start_line is None or end_line is None:
-            return f"Error: Must specify start_line and end_line. File has {total_lines} lines. Use grep to find relevant line numbers first."
+            return tool_error(f"Must specify start_line and end_line. File has {total_lines} lines. Use grep to find relevant line numbers first.")
 
         # Convert to 0-indexed, handle defaults
         start = (start_line - 1) if start_line else 0
@@ -377,9 +415,9 @@ def read_file(path: str, start_line: int | None = None, end_line: int | None = N
 
         return result
     except PermissionError:
-        return f"Error: Permission denied: {path}"
+        return permission_denied(path)
     except Exception as e:
-        return f"Error reading file: {e}"
+        return tool_error(f"Reading file: {e}")
 
 
 def read_around(path: str, line: int, context: int = 10) -> str:
@@ -397,9 +435,9 @@ def write_file(path: str, content: str) -> str:
         p.write_text(content)
         return f"Successfully wrote {len(content)} bytes to {path}"
     except PermissionError:
-        return f"Error: Permission denied: {path}"
+        return permission_denied(path)
     except Exception as e:
-        return f"Error writing file: {e}"
+        return tool_error(f"Writing file: {e}")
 
 
 def bash(command: str) -> str:
@@ -424,9 +462,9 @@ def bash(command: str) -> str:
             output += f"\n[exit code: {result.returncode}]"
         return output if output else "(no output)"
     except subprocess.TimeoutExpired:
-        return "Error: Command timed out after 60 seconds"
+        return tool_error("Command timed out after 60 seconds")
     except Exception as e:
-        return f"Error executing command: {e}"
+        return tool_error(f"Executing command: {e}")
 
 
 def edit_file(path: str, old_string: str, new_string: str) -> str:
@@ -434,25 +472,25 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
     try:
         p = Path(path).expanduser().resolve()
         if not p.exists():
-            return f"Error: File not found: {path}"
+            return file_not_found(path)
         if not p.is_file():
-            return f"Error: Not a file: {path}"
+            return not_a_file(path)
 
         content = p.read_text()
         count = content.count(old_string)
 
         if count == 0:
-            return f"Error: String not found in {path}"
+            return tool_error(f"String not found in {path}")
         if count > 1:
-            return f"Error: String appears {count} times in {path}. Must be unique."
+            return tool_error(f"String appears {count} times in {path}. Must be unique.")
 
         new_content = content.replace(old_string, new_string, 1)
         p.write_text(new_content)
         return f"Successfully edited {path}"
     except PermissionError:
-        return f"Error: Permission denied: {path}"
+        return permission_denied(path)
     except Exception as e:
-        return f"Error editing file: {e}"
+        return tool_error(f"Editing file: {e}")
 
 
 def glob_files(pattern: str, path: str | None = None) -> str:
@@ -460,7 +498,7 @@ def glob_files(pattern: str, path: str | None = None) -> str:
     try:
         base = Path(path).expanduser().resolve() if path else Path.cwd()
         if not base.exists():
-            return f"Error: Path not found: {path}"
+            return path_not_found(path)
 
         matches = sorted(base.glob(pattern))
         # Filter to files only, excluding ignored directories
@@ -477,7 +515,7 @@ def glob_files(pattern: str, path: str | None = None) -> str:
             return "\n".join(files[:100]) + f"\n... and {len(files) - 100} more files"
         return "\n".join(files)
     except Exception as e:
-        return f"Error searching files: {e}"
+        return tool_error(f"Searching files: {e}")
 
 
 def grep_files(pattern: str, path: str | None = None, glob_pattern: str | None = None) -> str:
@@ -485,12 +523,12 @@ def grep_files(pattern: str, path: str | None = None, glob_pattern: str | None =
     try:
         regex = re.compile(pattern)
     except re.error as e:
-        return f"Error: Invalid regex pattern: {e}"
+        return tool_error(f"Invalid regex pattern: {e}")
 
     try:
         base = Path(path).expanduser().resolve() if path else Path.cwd()
         if not base.exists():
-            return f"Error: Path not found: {path}"
+            return path_not_found(path)
 
         results = []
         max_results = 100
@@ -533,7 +571,7 @@ def grep_files(pattern: str, path: str | None = None, glob_pattern: str | None =
             output += f"\n... (limited to {max_results} results)"
         return output
     except Exception as e:
-        return f"Error searching: {e}"
+        return tool_error(f"Searching: {e}")
 
 
 def git_command(operation: str, args: str | None = None) -> str:
@@ -549,7 +587,7 @@ def git_command(operation: str, args: str | None = None) -> str:
     }
 
     if operation not in commands:
-        return f"Error: Unknown git operation: {operation}"
+        return tool_error(f"Unknown git operation: {operation}")
 
     cmd = commands[operation]
 
@@ -579,9 +617,9 @@ def git_command(operation: str, args: str | None = None) -> str:
             output += result.stderr
         return output if output else "(no output)"
     except subprocess.TimeoutExpired:
-        return "Error: Git command timed out"
+        return tool_error("Git command timed out")
     except Exception as e:
-        return f"Error running git: {e}"
+        return tool_error(f"Running git: {e}")
 
 
 TOOL_FUNCTIONS = {
@@ -599,7 +637,7 @@ TOOL_FUNCTIONS = {
 def execute_tool(name: str, arguments: dict) -> str:
     """Execute a tool by name with the given arguments."""
     if name not in TOOL_FUNCTIONS:
-        return f"Error: Unknown tool: {name}"
+        return tool_error(f"Unknown tool: {name}")
 
     # Filter to only valid parameters (models sometimes hallucinate extra args)
     import inspect
