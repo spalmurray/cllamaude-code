@@ -5,6 +5,7 @@ import difflib
 import json
 import os
 import re
+import shlex
 import sys
 import time
 import threading
@@ -25,7 +26,7 @@ from .config import (
     MAX_CHANGE_HISTORY, HISTORY_DISPLAY_LIMIT, DEFAULT_CONTEXT_WINDOW,
     COMMAND_DISPLAY_MAX, QUESTION_PREVIEW_MAX, NOTE_PREVIEW_MAX,
     MAX_FUNCTIONS_IN_SUMMARY, RESULT_PREVIEW_LINES, SPINNER_REFRESH_RATE,
-    COMPRESSIBLE_TOOLS, PLANNING_BLOCKED_TOOLS, EXECUTE_TRIGGERS,
+    COMPRESSIBLE_TOOLS, PLANNING_BLOCKED_TOOLS, EXECUTE_TRIGGERS, SAFE_TOOLS,
     MAX_IMPORTS_DISPLAY, MAX_CLASSES_DISPLAY, MAX_FUNCTIONS_DISPLAY,
 )
 from .conversation import Conversation
@@ -662,7 +663,6 @@ def is_path_in_cwd(path: str) -> bool:
 
 def is_safe_bash_command(command: str) -> bool:
     """Check if a bash command is safe to auto-approve."""
-    import shlex
     try:
         parts = shlex.split(command)
     except ValueError:
@@ -699,64 +699,53 @@ def is_safe_bash_command(command: str) -> bool:
 
 def is_dangerous_git_command(command: str) -> str | None:
     """Check if a command is a dangerous git operation. Returns warning message or None."""
-    import shlex
     try:
         parts = shlex.split(command)
     except ValueError:
         return None
 
-    if not parts:
-        return None
-
-    # Check for git commands
-    if parts[0] != "git":
-        return None
-
-    if len(parts) < 2:
+    if not parts or parts[0] != "git" or len(parts) < 2:
         return None
 
     subcommand = parts[1]
 
-    # Block these entirely
-    blocked = {
+    # Commands that are always blocked
+    always_blocked = {
         "commit": "Git commits are blocked. Make commits manually.",
         "push": "Git push is blocked. Push manually after reviewing changes.",
         "reset": "Git reset is blocked. Reset manually if needed.",
-        "checkout": None,  # Only block specific patterns
         "clean": "Git clean is blocked. Clean manually if needed.",
         "rebase": "Git rebase is blocked. Rebase manually.",
         "merge": "Git merge is blocked. Merge manually.",
-        "branch": None,  # Only block -D
-        "stash": None,  # stash drop is dangerous
     }
 
-    if subcommand in blocked and blocked[subcommand]:
-        return blocked[subcommand]
+    if subcommand in always_blocked:
+        return always_blocked[subcommand]
 
-    # Check for dangerous flags/patterns
+    # Commands with specific dangerous patterns
     if subcommand == "checkout":
         # Block `git checkout .` or `git checkout -- .` (discard all changes)
-        if "." in parts or "--" in parts:
-            return "Git checkout that discards changes is blocked."
+        # But allow `git checkout -- specificfile.txt`
+        args_after_cmd = parts[2:]
+        # Remove the "--" separator if present
+        if "--" in args_after_cmd:
+            args_after_cmd = args_after_cmd[args_after_cmd.index("--") + 1:]
+        # Block if "." is the target (discards all changes)
+        if "." in args_after_cmd:
+            return "Git checkout that discards all changes is blocked."
 
-    if subcommand == "branch":
-        # Block force delete
-        if "-D" in parts:
-            return "Force branch deletion (-D) is blocked. Use -d for safe delete."
+    if subcommand == "branch" and "-D" in parts:
+        return "Force branch deletion (-D) is blocked. Use -d for safe delete."
 
-    if subcommand == "stash":
-        if "drop" in parts or "clear" in parts:
-            return "Git stash drop/clear is blocked."
-
-    if subcommand == "reset":
-        return "Git reset is blocked. Reset manually if needed."
+    if subcommand == "stash" and ("drop" in parts or "clear" in parts):
+        return "Git stash drop/clear is blocked."
 
     return None
 
 
 def confirm_tool(name: str, args: dict, auto_approve: bool = False) -> bool:
     """Ask for confirmation before executing a destructive tool."""
-    if name in ("read_file", "read_around", "glob", "grep", "git", "note", "clear_note"):
+    if name in SAFE_TOOLS:
         # Read operations and notes are safe, no confirmation needed
         return True
 
