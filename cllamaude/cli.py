@@ -1070,6 +1070,12 @@ def run_agent_loop(
             if tool_calls:
                 console.print("[dim](parsed tool call from text)[/dim]")
 
+        # Limit parallel tool calls to avoid XML generation issues
+        MAX_PARALLEL_TOOL_CALLS = 3
+        if tool_calls and len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:
+            console.print(f"[dim](limiting {len(tool_calls)} tool calls to {MAX_PARALLEL_TOOL_CALLS})[/dim]")
+            tool_calls = tool_calls[:MAX_PARALLEL_TOOL_CALLS]
+
         if not tool_calls:
             # No tool calls, just a text response
             if content:

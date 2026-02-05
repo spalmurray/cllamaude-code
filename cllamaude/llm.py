@@ -82,6 +82,7 @@ Example: After grepping and finding `api/views.py:42:def filter_incidents`, call
 
 ## Important Rules
 
+- Only call up to 3 tools at a time. If you need to do more, do them in batches across multiple turns.
 - Only use the `git` tool for git operations. Do NOT run git commands via bash - the git tool provides safe, read-only operations.
 - ALWAYS read a file before modifying it. Never assume you know what's in a file.
 - When editing files, preserve existing code. Only change what's necessary for the task.
