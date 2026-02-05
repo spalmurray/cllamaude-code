@@ -17,6 +17,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.syntax import Syntax
@@ -901,22 +902,22 @@ def display_tool_result(name: str, args: dict, result: str, output_id: int | Non
         lines = result.split("\n")
         console.print(f"[dim]Read {len(lines)} lines{id_suffix}[/dim]")
     elif name == "bash":
-        console.print(Panel(result, title=f"Output{id_suffix}", border_style="dim"))
+        console.print(Panel(escape(result), title=f"Output{id_suffix}", border_style="dim"))
     elif name == "git" and not is_error(result):
         lines = result.split("\n")
         op = args.get("operation", "")
         if op in ("diff", "diff_staged", "blame", "show"):
             console.print(f"[dim]git {op}: {len(lines)} lines{id_suffix}[/dim]")
         else:
-            console.print(Panel(result, title=f"git {op}{id_suffix}", border_style="dim"))
+            console.print(Panel(escape(result), title=f"git {op}{id_suffix}", border_style="dim"))
     elif name in ("glob", "grep") and not is_error(result) and not result.startswith("No "):
         lines = result.split("\n")
         preview = "\n".join(lines[:RESULT_PREVIEW_LINES])
         if len(lines) > RESULT_PREVIEW_LINES:
             preview += f"\n... ({len(lines) - RESULT_PREVIEW_LINES} more)"
-        console.print(Panel(preview, title=f"{name} results", border_style="dim"))
+        console.print(Panel(escape(preview), title=f"{name} results", border_style="dim"))
     else:
-        console.print(f"[dim]{result}[/dim]")
+        console.print(f"[dim]{escape(result)}[/dim]")
 
 
 def execute_tool_call(
