@@ -39,7 +39,7 @@ from .tools import execute_tool, is_error
 
 console = Console()
 
-TOOL_NAMES = {"read_file", "read_around", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "forget_file", "remember_output", "forget_output", "git", "note", "clear_note"}
+TOOL_NAMES = {"read_file", "read_around", "write_file", "bash", "edit_file", "glob", "grep", "undo_changes", "ask_user", "remember_file", "forget_file", "remember_output", "forget_output", "git", "note", "clear_note", "web_search", "fetch_url"}
 
 
 @dataclass
@@ -898,7 +898,9 @@ def display_tool_result(name: str, args: dict, result: str, output_id: int | Non
     """Display the result of a tool execution."""
     id_suffix = f" [output #{output_id}]" if output_id else ""
 
-    if name in ("read_file", "read_around"):
+    if name in ("web_search", "fetch_url"):
+        return
+    elif name in ("read_file", "read_around"):
         lines = result.split("\n")
         console.print(f"[dim]Read {len(lines)} lines{id_suffix}[/dim]")
     elif name == "bash":

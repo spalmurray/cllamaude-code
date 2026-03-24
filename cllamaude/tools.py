@@ -357,6 +357,44 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "web_search",
+            "description": "Search the web using DuckDuckGo. Returns titles, URLs, and snippets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 5)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch the text content of a URL. Useful for reading documentation, articles, or pages found via web_search.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git",
             "description": "Run read-only git commands to understand repository state.",
             "parameters": {
@@ -619,6 +657,49 @@ def git_command(operation: str, args: str | None = None) -> str:
         return tool_error(f"Running git: {e}")
 
 
+def web_search(query: str, max_results: int = 5) -> str:
+    """Search the web using DuckDuckGo."""
+    try:
+        from ddgs import DDGS
+        results = list(DDGS().text(query, max_results=max_results))
+        if not results:
+            return "No results found."
+        lines = []
+        for r in results:
+            lines.append(f"[{r['title']}]({r['href']})\n{r['body']}")
+        return "\n\n".join(lines)
+    except Exception as e:
+        return tool_error(f"Web search failed: {e}")
+
+
+def fetch_url(url: str) -> str:
+    """Fetch a URL and return its text content."""
+    try:
+        import httpx
+        from lxml import etree
+
+        response = httpx.get(url, follow_redirects=True, timeout=15)
+        response.raise_for_status()
+
+        content_type = response.headers.get("content-type", "")
+        if "text/html" not in content_type and "application/xhtml" not in content_type:
+            return response.text[:10000]
+
+        parser = etree.HTMLParser()
+        tree = etree.fromstring(response.content, parser)
+
+        # Remove script, style, nav, footer noise
+        for tag in tree.xpath("//script|//style|//nav|//footer|//header"):
+            tag.getparent().remove(tag)
+
+        text = " ".join(tree.xpath("//body//text()"))
+        # Collapse whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:10000] if text else "(no text content)"
+    except Exception as e:
+        return tool_error(f"Fetching URL failed: {e}")
+
+
 TOOL_FUNCTIONS = {
     "read_file": read_file,
     "read_around": read_around,
@@ -628,6 +709,8 @@ TOOL_FUNCTIONS = {
     "glob": glob_files,
     "grep": grep_files,
     "git": git_command,
+    "web_search": web_search,
+    "fetch_url": fetch_url,
 }
 
 
