@@ -40,7 +40,7 @@ DEFAULT_EDITOR = "vim"  # Fallback editor if $EDITOR not set
 COMPRESSIBLE_TOOLS = {"read_file", "read_around", "git", "bash", "grep", "glob"}
 
 # Read-only tools that don't need confirmation
-SAFE_TOOLS = {"read_file", "read_around", "glob", "grep", "git", "note", "clear_note"}
+SAFE_TOOLS = {"read_file", "read_around", "glob", "grep", "git", "note", "clear_note", "web_search", "fetch_url"}
 
 # Tools blocked in planning mode
 PLANNING_BLOCKED_TOOLS = {"write_file", "edit_file", "bash", "undo_changes"}
